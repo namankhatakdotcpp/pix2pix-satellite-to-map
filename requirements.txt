@@ -1,0 +1,11 @@
+tensorflow>=2.10
+keras>=2.10
+numpy
+matplotlib
+Pillow
+imageio
+tqdm
+fastapi
+uvicorn
+python-multipart
+scikit-image
