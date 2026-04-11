@@ -261,6 +261,20 @@ def evaluate_metrics(generator, test_ds, num_samples=50):
     }
 
 
+def evaluate(generator, test_ds, num_samples=50):
+    """Compatibility wrapper: compute and print MAE/SSIM/PSNR."""
+    metrics = evaluate_metrics(generator, test_ds, num_samples=num_samples)
+    if not metrics:
+        print("[WARN] Metrics unavailable. Install scikit-image for SSIM/PSNR.")
+        return {}
+    print(
+        f"MAE: {metrics['MAE']:.4f} | "
+        f"SSIM: {metrics['SSIM']:.4f} | "
+        f"PSNR: {metrics['PSNR']:.2f}dB"
+    )
+    return metrics
+
+
 # ─────────────────────────────────────────────
 # SAMPLE IMAGE SAVING
 # ─────────────────────────────────────────────
@@ -373,8 +387,8 @@ def main():
         # Optimizers with LR variable (for decay schedule)
         gen_lr  = tf.Variable(args.lr, trainable=False, dtype=tf.float32)
         disc_lr = tf.Variable(args.lr, trainable=False, dtype=tf.float32)
-        gen_optimizer  = tf.keras.optimizers.Adam(gen_lr,  beta_1=0.5)
-        disc_optimizer = tf.keras.optimizers.Adam(disc_lr, beta_1=0.5)
+        gen_optimizer  = tf.keras.optimizers.Adam(learning_rate=0.0002, beta_1=0.5)
+        disc_optimizer = tf.keras.optimizers.Adam(learning_rate=0.0002, beta_1=0.5)
 
     @tf.function
     def single_train_step(sat_batch, map_batch):
