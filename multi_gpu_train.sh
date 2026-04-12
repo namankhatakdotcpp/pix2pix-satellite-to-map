@@ -34,10 +34,11 @@ python src/train.py \
   --results_dir outputs/test_results \
   --savedir saved_models \
   --logdir logs \
+  --split_order map_sat \
   --epochs 200 \
   --batch_size 4 \
   --lr 2e-4 \
-  --lambda_l1 100 \
+  --lambda_l1 200 \
   --decay_epoch 100 \
   --save_every 10 \
   --eval_every 10 \

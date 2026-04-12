@@ -1,18 +1,20 @@
 """
 train.py — Enhanced Pix2Pix Training Script
 Fixes applied:
-  1. Default paths are repo-relative (no more ../)
-  2. Tensor float casting in all logging
-  3. Demo early-stop breaks outer loop too
+    1. Default paths are repo-relative (no more ../)
+    2. Tensor float casting in all logging
+    3. Demo early-stop breaks outer loop too
 Enhancements:
-  - Multi-GPU support via MirroredStrategy (8x A6000 ready)
-  - LR decay schedule (paper-faithful: decay from epoch 100)
-  - Per-epoch MAE/SSIM/PSNR evaluation
-  - TensorBoard logging
-  - Best model checkpoint based on SSIM
-  - Progress bar via tqdm
-  - GIF generation from epoch samples
-  - Resumable from any checkpoint
+    - Multi-GPU support via MirroredStrategy (8x A6000 ready)
+    - Configurable paired-image split order (map|sat or sat|map)
+    - Dataset sanity-check preview image before long training
+    - LR decay schedule (paper-faithful: decay from epoch 100)
+    - Per-epoch MAE/SSIM/PSNR evaluation
+    - TensorBoard logging
+    - Best model checkpoint based on SSIM
+    - Progress bar via tqdm
+    - GIF generation from epoch samples
+    - Resumable from any checkpoint
 """
 
 import os
@@ -38,16 +40,39 @@ except ImportError:
 # DATA PIPELINE
 # ─────────────────────────────────────────────
 
-def load_image(image_path):
-    """Load and split a paired satellite|map image."""
+SUPPORTED_IMAGE_EXTS = ("*.jpg", "*.jpeg", "*.png")
+
+
+def list_image_files(data_dir):
+    """Return sorted list of supported image files in a directory."""
+    files = []
+    for ext in SUPPORTED_IMAGE_EXTS:
+        files.extend(tf.io.gfile.glob(os.path.join(data_dir, ext)))
+    return sorted(files)
+
+def load_image(image_path, split_order="map_sat"):
+    """
+    Load and split one paired image.
+
+    split_order:
+      - map_sat: left=map, right=satellite (common in maps dataset)
+      - sat_map: left=satellite, right=map
+    """
     img = tf.io.read_file(image_path)
-    img = tf.image.decode_jpeg(img, channels=3)
+    img = tf.image.decode_image(img, channels=3, expand_animations=False)
     w = tf.shape(img)[1]
     w = w // 2
-    # NOTE: In the maps dataset, LEFT half = map, RIGHT half = satellite
-    # Input to generator = satellite, Target = map
-    real_map = img[:, :w, :]       # left = map (ground truth)
-    satellite = img[:, w:, :]      # right = satellite (input)
+
+    left = img[:, :w, :]
+    right = img[:, w:, :]
+
+    if split_order == "sat_map":
+        satellite = left
+        real_map = right
+    else:
+        real_map = left
+        satellite = right
+
     real_map = tf.cast(real_map, tf.float32)
     satellite = tf.cast(satellite, tf.float32)
     return satellite, real_map
@@ -73,31 +98,73 @@ def random_jitter(satellite, real_map):
     return satellite, real_map
 
 
-def load_train_image(image_path):
-    satellite, real_map = load_image(image_path)
+def load_train_image(image_path, split_order="map_sat"):
+    satellite, real_map = load_image(image_path, split_order=split_order)
     satellite, real_map = random_jitter(satellite, real_map)
     satellite, real_map = normalize(satellite, real_map)
     return satellite, real_map
 
 
-def load_test_image(image_path):
-    satellite, real_map = load_image(image_path)
+def load_test_image(image_path, split_order="map_sat"):
+    satellite, real_map = load_image(image_path, split_order=split_order)
     satellite = tf.image.resize(satellite, [256, 256])
     real_map  = tf.image.resize(real_map,  [256, 256])
     satellite, real_map = normalize(satellite, real_map)
     return satellite, real_map
 
 
-def build_dataset(data_dir, batch_size, is_train=True, buffer_size=400):
-    pattern = os.path.join(data_dir, "*.jpg")
-    files = tf.data.Dataset.list_files(pattern)
+def build_dataset(data_dir, batch_size, is_train=True, buffer_size=400, split_order="map_sat"):
+    image_files = list_image_files(data_dir)
+    if not image_files:
+        raise RuntimeError(
+            f"No images found in {data_dir}. Supported extensions: {', '.join(SUPPORTED_IMAGE_EXTS)}"
+        )
+
+    files = tf.data.Dataset.from_tensor_slices(image_files)
     if is_train:
-        ds = files.map(load_train_image, num_parallel_calls=tf.data.AUTOTUNE)
+        files = files.shuffle(len(image_files), reshuffle_each_iteration=True)
+
+    if is_train:
+        ds = files.map(
+            lambda p: load_train_image(p, split_order=split_order),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
         ds = ds.shuffle(buffer_size).batch(batch_size).prefetch(tf.data.AUTOTUNE)
     else:
-        ds = files.map(load_test_image, num_parallel_calls=tf.data.AUTOTUNE)
+        ds = files.map(
+            lambda p: load_test_image(p, split_order=split_order),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
         ds = ds.batch(1).prefetch(tf.data.AUTOTUNE)
     return ds
+
+
+def save_data_check_preview(data_dir, split_order, output_path):
+    """Save one preview panel showing the current split interpretation."""
+    files = list_image_files(data_dir)
+    if not files:
+        print(f"[WARN] Data check skipped: no files in {data_dir}")
+        return
+
+    sat, real_map = load_test_image(files[0], split_order=split_order)
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].imshow((sat.numpy() * 0.5 + 0.5).clip(0, 1))
+    axes[0].set_title('Input (Satellite)')
+    axes[0].axis('off')
+    axes[1].imshow((real_map.numpy() * 0.5 + 0.5).clip(0, 1))
+    axes[1].set_title('Target (Map)')
+    axes[1].axis('off')
+    plt.tight_layout()
+
+    os.makedirs(Path(output_path).parent, exist_ok=True)
+    plt.savefig(output_path, dpi=120, bbox_inches='tight')
+    plt.close()
+    print(f"[DATA] Saved split-order preview to {output_path} (split_order={split_order})")
 
 
 # ─────────────────────────────────────────────
@@ -335,12 +402,18 @@ def main():
     parser.add_argument('--epochs',      type=int,   default=200)
     parser.add_argument('--batch_size',  type=int,   default=1)
     parser.add_argument('--lr',          type=float, default=2e-4)
-    parser.add_argument('--lambda_l1',   type=float, default=100.0,
-                        help='L1 loss weight. Try 50 if output is blurry.')
+    parser.add_argument('--lambda_l1',   type=float, default=200.0,
+                        help='L1 loss weight. Try 50 if blurry; 100-200 often works for maps.')
     parser.add_argument('--decay_epoch', type=int,   default=100,
                         help='Epoch to start LR linear decay (paper default: 100)')
     parser.add_argument('--save_every',  type=int,   default=10)
     parser.add_argument('--eval_every',  type=int,   default=10)
+    parser.add_argument('--split_order', type=str, default='map_sat', choices=['map_sat', 'sat_map'],
+                        help='How paired image is arranged: map_sat means left=map,right=satellite; sat_map means left=satellite,right=map')
+    parser.add_argument('--require_gpu', action='store_true',
+                        help='Fail fast if no GPU is visible')
+    parser.add_argument('--skip_data_check', action='store_true',
+                        help='Skip writing data split sanity preview image')
     # Mode
     parser.add_argument('--mode',        default='full', choices=['full', 'demo'])
     parser.add_argument('--demo_steps',  type=int,   default=5)
@@ -368,12 +441,27 @@ def main():
         effective_batch = args.batch_size
         num_gpus = 1
 
+    visible_gpus = tf.config.list_physical_devices('GPU')
+    if visible_gpus:
+        print(f"[GPU] Visible GPUs: {len(visible_gpus)}")
+    else:
+        print("[WARN] No GPU visible. CPU training will converge slower and often underperform.")
+        if args.require_gpu:
+            raise RuntimeError("--require_gpu was set, but no GPU is visible.")
+
+    if not args.skip_data_check:
+        save_data_check_preview(
+            args.data_dir,
+            args.split_order,
+            os.path.join(args.results_dir, 'data_split_preview.png'),
+        )
+
     # ── Build datasets ─────────────────────────────────────────────────
-    train_ds = build_dataset(args.data_dir, effective_batch, is_train=True)
-    test_ds  = build_dataset(args.test_dir, 1, is_train=False)
+    train_ds = build_dataset(args.data_dir, effective_batch, is_train=True, split_order=args.split_order)
+    test_ds  = build_dataset(args.test_dir, 1, is_train=False, split_order=args.split_order)
 
     # Count training samples
-    n_train = len(tf.io.gfile.glob(os.path.join(args.data_dir, "*.jpg")))
+    n_train = len(list_image_files(args.data_dir))
     if n_train == 0:
         raise RuntimeError(f"No training images found in {args.data_dir} (expected *.jpg)")
     steps_per_epoch = max(1, int(math.ceil(n_train / effective_batch)))
