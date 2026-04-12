@@ -40,7 +40,7 @@ except ImportError:
 # DATA PIPELINE
 # ─────────────────────────────────────────────
 
-SUPPORTED_IMAGE_EXTS = ("*.jpg", "*.jpeg", "*.png")
+SUPPORTED_IMAGE_EXTS = ("*.jpg", "*.jpeg")
 
 
 def list_image_files(data_dir):
@@ -59,9 +59,8 @@ def load_image(image_path, split_order="map_sat"):
       - sat_map: left=satellite, right=map
     """
     img = tf.io.read_file(image_path)
-    img = tf.image.decode_image(img, channels=3, expand_animations=False)
-    w = tf.shape(img)[1]
-    w = w // 2
+    img = tf.image.decode_jpeg(img, channels=3)
+    w = tf.shape(img)[1] // 2
 
     left = img[:, :w, :]
     right = img[:, w:, :]
@@ -391,6 +390,16 @@ def save_saved_model(model, path):
 # ─────────────────────────────────────────────
 
 def main():
+    def str2bool(value):
+        if isinstance(value, bool):
+            return value
+        value = str(value).strip().lower()
+        if value in {"true", "1", "yes", "y", "on"}:
+            return True
+        if value in {"false", "0", "no", "n", "off"}:
+            return False
+        raise argparse.ArgumentTypeError("Expected true/false for boolean option")
+
     parser = argparse.ArgumentParser(description="Pix2Pix Satellite→Map Training")
     # Paths — FIX 1: repo-relative defaults (no more ../)
     parser.add_argument('--data_dir',    default='data/train',           help='Training images dir')
@@ -400,7 +409,7 @@ def main():
     parser.add_argument('--logdir',      default='logs',                 help='TensorBoard log dir')
     # Training hyperparams
     parser.add_argument('--epochs',      type=int,   default=200)
-    parser.add_argument('--batch_size',  type=int,   default=1)
+    parser.add_argument('--batch_size',  type=int,   default=4)
     parser.add_argument('--lr',          type=float, default=2e-4)
     parser.add_argument('--lambda_l1',   type=float, default=200.0,
                         help='L1 loss weight. Try 50 if blurry; 100-200 often works for maps.')
@@ -412,8 +421,8 @@ def main():
                         help='How paired image is arranged: map_sat means left=map,right=satellite; sat_map means left=satellite,right=map')
     parser.add_argument('--require_gpu', action='store_true',
                         help='Fail fast if no GPU is visible')
-    parser.add_argument('--skip_data_check', action='store_true',
-                        help='Skip writing data split sanity preview image')
+    parser.add_argument('--skip_data_check', nargs='?', const=True, default=False, type=str2bool,
+                        help='Skip writing data split sanity preview image (true/false)')
     # Mode
     parser.add_argument('--mode',        default='full', choices=['full', 'demo'])
     parser.add_argument('--demo_steps',  type=int,   default=5)
