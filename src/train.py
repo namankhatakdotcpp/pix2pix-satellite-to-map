@@ -40,7 +40,7 @@ except ImportError:
 # DATA PIPELINE
 # ─────────────────────────────────────────────
 
-SUPPORTED_IMAGE_EXTS = ("*.jpg", "*.jpeg")
+SUPPORTED_IMAGE_EXTS = ("*.jpg", "*.jpeg", "*.png")
 
 
 def list_image_files(data_dir):
@@ -49,6 +49,66 @@ def list_image_files(data_dir):
     for ext in SUPPORTED_IMAGE_EXTS:
         files.extend(tf.io.gfile.glob(os.path.join(data_dir, ext)))
     return sorted(files)
+
+
+def map_likeliness_score(img_01):
+    """Heuristic map-likeliness score from saturation and colorfulness."""
+    hsv = tf.image.rgb_to_hsv(img_01)
+    sat_mean = float(tf.reduce_mean(hsv[..., 1]).numpy())
+
+    arr = img_01.numpy()
+    r = arr[..., 0]
+    g = arr[..., 1]
+    b = arr[..., 2]
+    rg = np.abs(r - g)
+    yb = np.abs(0.5 * (r + g) - b)
+    colorfulness = np.sqrt(np.var(rg) + np.var(yb)) + (0.3 * np.sqrt(np.mean(rg) ** 2 + np.mean(yb) ** 2))
+
+    return sat_mean + (0.5 * float(colorfulness))
+
+
+def suggest_split_order(data_dir, num_samples=50):
+    """Suggest map_sat or sat_map by comparing left/right map-likeliness."""
+    files = list_image_files(data_dir)[:num_samples]
+    if not files:
+        return None
+
+    votes_map_sat = 0
+    votes_sat_map = 0
+    margins = []
+
+    for image_path in files:
+        img = tf.io.read_file(image_path)
+        # Single decode path for jpg/jpeg/png.
+        img = tf.image.decode_image(img, channels=3, expand_animations=False)
+        img.set_shape([None, None, 3])
+        img = tf.image.convert_image_dtype(img, tf.float32)
+
+        half_w = tf.shape(img)[1] // 2
+        left = img[:, :half_w, :]
+        right = img[:, half_w:, :]
+
+        left_score = map_likeliness_score(left)
+        right_score = map_likeliness_score(right)
+        margins.append(abs(left_score - right_score))
+
+        if left_score >= right_score:
+            votes_map_sat += 1
+        else:
+            votes_sat_map += 1
+
+    suggested = "map_sat" if votes_map_sat >= votes_sat_map else "sat_map"
+    confidence = max(votes_map_sat, votes_sat_map) / max(1, len(files))
+    mean_margin = float(np.mean(margins)) if margins else 0.0
+
+    return {
+        "suggested": suggested,
+        "confidence": confidence,
+        "votes_map_sat": votes_map_sat,
+        "votes_sat_map": votes_sat_map,
+        "mean_margin": mean_margin,
+        "num_samples": len(files),
+    }
 
 def load_image(image_path, split_order="map_sat"):
     """
@@ -59,7 +119,9 @@ def load_image(image_path, split_order="map_sat"):
       - sat_map: left=satellite, right=map
     """
     img = tf.io.read_file(image_path)
-    img = tf.image.decode_jpeg(img, channels=3)
+    # Single decode path for jpg/jpeg/png.
+    img = tf.image.decode_image(img, channels=3, expand_animations=False)
+    img.set_shape([None, None, 3])
     w = tf.shape(img)[1] // 2
 
     left = img[:, :w, :]
@@ -273,9 +335,10 @@ def generator_loss(disc_generated_output, gen_output, target, lambda_l1=100):
     total    = adv_loss + (lambda_l1 * l1_loss)
     return total, adv_loss, l1_loss
 
-def discriminator_loss(disc_real_output, disc_generated_output):
-    """BCE on real + fake."""
-    real_loss = loss_object(tf.ones_like(disc_real_output),  disc_real_output)
+def discriminator_loss(disc_real_output, disc_generated_output, label_smoothing=0.0):
+    """BCE on real + fake with optional one-sided label smoothing."""
+    real_target = tf.ones_like(disc_real_output) * (1.0 - label_smoothing)
+    real_loss = loss_object(real_target, disc_real_output)
     fake_loss = loss_object(tf.zeros_like(disc_generated_output), disc_generated_output)
     return real_loss + fake_loss
 
@@ -285,7 +348,7 @@ def discriminator_loss(disc_real_output, disc_generated_output):
 # ─────────────────────────────────────────────
 
 def train_step(satellite, real_map, generator, discriminator,
-               gen_optimizer, disc_optimizer, lambda_l1):
+               gen_optimizer, disc_optimizer, lambda_l1, label_smoothing=0.0):
     with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
         gen_map = generator(satellite, training=True)
 
@@ -293,7 +356,7 @@ def train_step(satellite, real_map, generator, discriminator,
         disc_fake = discriminator([satellite, gen_map],  training=True)
 
         gen_total, gen_adv, gen_l1 = generator_loss(disc_fake, gen_map, real_map, lambda_l1)
-        disc_total = discriminator_loss(disc_real, disc_fake)
+        disc_total = discriminator_loss(disc_real, disc_fake, label_smoothing=label_smoothing)
 
     gen_grads  = gen_tape.gradient(gen_total,  generator.trainable_variables)
     disc_grads = disc_tape.gradient(disc_total, discriminator.trainable_variables)
@@ -417,10 +480,16 @@ def main():
                         help='Epoch to start LR linear decay (paper default: 100)')
     parser.add_argument('--save_every',  type=int,   default=10)
     parser.add_argument('--eval_every',  type=int,   default=10)
+    parser.add_argument('--sample_every', type=int, default=5,
+                        help='Save sample visualization every N epochs')
     parser.add_argument('--split_order', type=str, default='map_sat', choices=['map_sat', 'sat_map'],
                         help='How paired image is arranged: map_sat means left=map,right=satellite; sat_map means left=satellite,right=map')
+    parser.add_argument('--auto_split_detect', action='store_true',
+                        help='Analyze dataset halves and suggest split order before training')
     parser.add_argument('--require_gpu', action='store_true',
                         help='Fail fast if no GPU is visible')
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                        help='One-sided real-label smoothing for discriminator (0.0-0.2)')
     parser.add_argument('--skip_data_check', nargs='?', const=True, default=False, type=str2bool,
                         help='Skip writing data split sanity preview image (true/false)')
     # Mode
@@ -432,6 +501,26 @@ def main():
     parser.add_argument('--multi_gpu',   action='store_true',
                         help='Enable MirroredStrategy for multi-GPU training')
     args = parser.parse_args()
+
+    if args.batch_size < 4:
+        print(f"[WARN] batch_size={args.batch_size} is too low for stable Pix2Pix training; using 4")
+        args.batch_size = 4
+
+    args.label_smoothing = max(0.0, min(float(args.label_smoothing), 0.2))
+
+    if args.auto_split_detect:
+        suggestion = suggest_split_order(args.data_dir, num_samples=50)
+        if suggestion is not None:
+            print(
+                f"[SPLIT] Suggested={suggestion['suggested']} "
+                f"confidence={suggestion['confidence']:.2f} "
+                f"votes(map_sat/sat_map)={suggestion['votes_map_sat']}/{suggestion['votes_sat_map']} "
+                f"mean_margin={suggestion['mean_margin']:.4f}"
+            )
+            if suggestion['suggested'] != args.split_order:
+                print(
+                    f"[WARN] Selected split_order={args.split_order} differs from suggested={suggestion['suggested']}"
+                )
 
     # ── Create output directories ──────────────────────────────────────
     for d in [args.results_dir, args.savedir, args.logdir]:
@@ -462,7 +551,7 @@ def main():
         save_data_check_preview(
             args.data_dir,
             args.split_order,
-            os.path.join(args.results_dir, 'data_split_preview.png'),
+            os.path.join('outputs', 'data_split_preview.png'),
         )
 
     # ── Build datasets ─────────────────────────────────────────────────
@@ -472,7 +561,9 @@ def main():
     # Count training samples
     n_train = len(list_image_files(args.data_dir))
     if n_train == 0:
-        raise RuntimeError(f"No training images found in {args.data_dir} (expected *.jpg)")
+        raise RuntimeError(
+            f"No training images found in {args.data_dir}. Supported extensions: {', '.join(SUPPORTED_IMAGE_EXTS)}"
+        )
     steps_per_epoch = max(1, int(math.ceil(n_train / effective_batch)))
     print(f"[DATA] {n_train} training images | {steps_per_epoch} steps/epoch")
 
@@ -481,11 +572,9 @@ def main():
         generator     = build_generator()
         discriminator = build_discriminator()
 
-        # Optimizers with LR variable (for decay schedule)
-        gen_lr  = tf.Variable(args.lr, trainable=False, dtype=tf.float32)
-        disc_lr = tf.Variable(args.lr, trainable=False, dtype=tf.float32)
-        gen_optimizer  = tf.keras.optimizers.Adam(learning_rate=0.0002, beta_1=0.5)
-        disc_optimizer = tf.keras.optimizers.Adam(learning_rate=0.0002, beta_1=0.5)
+        # Optimizers with scalar float LR; decay updates assign into optimizer lr.
+        gen_optimizer  = tf.keras.optimizers.Adam(learning_rate=float(args.lr), beta_1=0.5)
+        disc_optimizer = tf.keras.optimizers.Adam(learning_rate=float(args.lr), beta_1=0.5)
 
     @tf.function
     def single_train_step(sat_batch, map_batch):
@@ -497,6 +586,7 @@ def main():
             gen_optimizer,
             disc_optimizer,
             args.lambda_l1,
+            args.label_smoothing,
         )
 
     if args.multi_gpu:
@@ -513,6 +603,7 @@ def main():
                     gen_optimizer,
                     disc_optimizer,
                     args.lambda_l1,
+                    args.label_smoothing,
                 )
 
             per_replica = strategy.run(replica_step, args=dist_batch)
@@ -563,11 +654,14 @@ def main():
             decay_steps = args.epochs - args.decay_epoch
             new_lr = args.lr * (1.0 - (epoch - args.decay_epoch) / max(1, decay_steps))
             new_lr = max(new_lr, 1e-7)
-            gen_lr.assign(new_lr)
-            disc_lr.assign(new_lr)
+            gen_optimizer.learning_rate.assign(new_lr)
+            disc_optimizer.learning_rate.assign(new_lr)
+
+        current_lr = float(gen_optimizer.learning_rate.numpy())
 
         # ── Batch loop ────────────────────────────────────────────────
         gen_losses, disc_losses = [], []
+        gen_l1_losses = []
         demo_done = False  # FIX 3: flag to break outer loop in demo mode
 
         pbar = tqdm(enumerate(distributed_train_ds.take(steps_per_epoch)), total=steps_per_epoch,
@@ -582,6 +676,7 @@ def main():
             # FIX 2: cast tensors to float before string formatting
             gen_losses.append(float(gen_total))
             disc_losses.append(float(disc_total))
+            gen_l1_losses.append(float(gen_l1))
 
             pbar.set_postfix({
                 'gen': f'{float(gen_total):.4f}',
@@ -598,25 +693,28 @@ def main():
             print(f"[DEMO] Stopping after {args.demo_steps} steps.")
             break  # FIX 3: breaks outer epoch loop too
 
-        # ── Epoch-level stats ─────────────────────────────────────────
+        # Epoch-level stats
         mean_gen  = float(np.mean(gen_losses))
         mean_disc = float(np.mean(disc_losses))
+        mean_l1   = float(np.mean(gen_l1_losses))
         elapsed   = time.time() - t0
 
         print(f"Epoch {epoch+1:03d}/{args.epochs} | "
-              f"gen={mean_gen:.4f} disc={mean_disc:.4f} | "
-              f"lr={float(gen_lr):.2e} | {elapsed:.1f}s")
+              f"gen={mean_gen:.4f} disc={mean_disc:.4f} l1={mean_l1:.4f} | "
+              f"lr={current_lr:.2e} | {elapsed:.1f}s")
 
         # ── TensorBoard ───────────────────────────────────────────────
         with summary_writer.as_default():
             tf.summary.scalar('loss/generator',     mean_gen,  step=epoch)
             tf.summary.scalar('loss/discriminator', mean_disc, step=epoch)
-            tf.summary.scalar('lr/generator',       float(gen_lr), step=epoch)
+            tf.summary.scalar('loss/l1',            mean_l1,   step=epoch)
+            tf.summary.scalar('lr/generator',       current_lr, step=epoch)
 
         # ── Save sample image ─────────────────────────────────────────
-        frame_path = save_sample(generator, test_ds, args.results_dir, epoch + 1)
-        if frame_path:
-            gif_frames.append(frame_path)
+        if (epoch + 1) % args.sample_every == 0 or epoch == 0:
+            frame_path = save_sample(generator, test_ds, args.results_dir, epoch + 1)
+            if frame_path:
+                gif_frames.append(frame_path)
 
         # ── Evaluate metrics ──────────────────────────────────────────
         if (epoch + 1) % args.eval_every == 0:

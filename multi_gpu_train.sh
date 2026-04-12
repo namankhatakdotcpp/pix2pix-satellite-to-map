@@ -35,11 +35,14 @@ python src/train.py \
   --savedir saved_models \
   --logdir logs \
   --split_order map_sat \
+  --auto_split_detect \
+  --require_gpu \
   --epochs 200 \
   --batch_size 4 \
   --lr 2e-4 \
   --lambda_l1 200 \
   --decay_epoch 100 \
+  --sample_every 5 \
   --save_every 10 \
   --eval_every 10 \
   --export
