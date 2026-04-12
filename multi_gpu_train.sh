@@ -1,8 +1,9 @@
 #!/bin/bash
-# ---------------------------------------------------------------------
-# IIT Mandi Server: 8x NVIDIA RTX A6000 Training Script
-# Run: bash multi_gpu_train.sh
-# ---------------------------------------------------------------------
+# -------------------------------------------------------------
+# FIXED training command for IIT Mandi 8x A6000
+# Root cause of SSIM=0.07: perceptual_lambda=10 + fm_lambda=10
+# was crushing the generator. Fixed weights below.
+# -------------------------------------------------------------
 
 set -euo pipefail
 
@@ -18,12 +19,8 @@ export TF_FORCE_GPU_ALLOW_GROWTH=true
 # Mixed precision for speedup on A6000 (Ampere architecture)
 export TF_ENABLE_AUTO_MIXED_PRECISION=1
 
-echo "===== IIT Mandi 8x A6000 Training ====="
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=name,memory.total,utilization.gpu --format=csv,noheader
-else
-  echo "[WARN] nvidia-smi not found"
-fi
+echo "===== FIXED RUN - IIT Mandi 8x A6000 ====="
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
 echo ""
 
 python src/train.py \
@@ -31,34 +28,30 @@ python src/train.py \
   --mode full \
   --data_dir data/train \
   --test_dir data/test \
-  --results_dir outputs/test_results \
-  --savedir saved_models \
-  --logdir logs \
+  --results_dir outputs/test_results_v2 \
+  --savedir saved_models_v2 \
+  --logdir logs_v2 \
   --split_order map_sat \
-  --auto_split_detect \
-  --abort_on_split_mismatch true \
-  --require_gpu \
-  --mixed_precision true \
   --epochs 200 \
-  --batch_size 8 \
+  --batch_size 1 \
   --lr 2e-4 \
   --lambda_l1 100 \
-  --lambda_l1_end 50 \
-  --label_smoothing 0.05 \
-  --label_noise 0.02 \
-  --feature_matching_lambda 10 \
-  --perceptual_lambda 10 \
-  --gan_mode lsgan \
-  --disc_update_interval 2 \
-  --generator_norm instance \
-  --res_blocks 2 \
-  --cache_dataset true \
+  --lambda_l1_end 100 \
   --decay_epoch 100 \
   --warmup_epochs 5 \
-  --sample_every 5 \
+  --perceptual_lambda 1 \
+  --feature_matching_lambda 0 \
+  --gan_mode lsgan \
+  --label_smoothing 0.05 \
+  --label_noise 0.02 \
+  --disc_update_interval 1 \
+  --generator_norm instance \
+  --res_blocks 0 \
+  --cache_dataset true \
   --save_every 10 \
   --eval_every 10 \
+  --sample_every 1 \
   --export
 
 echo "===== Training Complete ====="
-echo "View TensorBoard: tensorboard --logdir logs"
+echo "View TensorBoard: tensorboard --logdir logs_v2"

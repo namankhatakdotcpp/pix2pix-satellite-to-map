@@ -699,9 +699,8 @@ def main():
                         help='Enable MirroredStrategy for multi-GPU training')
     args = parser.parse_args()
 
-    if args.batch_size < 4:
-        print(f"[WARN] batch_size={args.batch_size} is too low for stable Pix2Pix training; using 4")
-        args.batch_size = 4
+    if args.batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {args.batch_size}")
     elif args.batch_size < 8:
         print(f"[WARN] batch_size={args.batch_size} works, but 8 is usually better if GPU memory allows")
 
