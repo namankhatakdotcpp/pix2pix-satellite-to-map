@@ -38,9 +38,10 @@ python src/train.py \
   --auto_split_detect \
   --require_gpu \
   --epochs 200 \
-  --batch_size 4 \
+  --batch_size 8 \
   --lr 2e-4 \
-  --lambda_l1 200 \
+  --lambda_l1 100 \
+  --label_smoothing 0.05 \
   --decay_epoch 100 \
   --sample_every 5 \
   --save_every 10 \

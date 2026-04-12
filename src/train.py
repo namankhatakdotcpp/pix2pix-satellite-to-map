@@ -472,10 +472,10 @@ def main():
     parser.add_argument('--logdir',      default='logs',                 help='TensorBoard log dir')
     # Training hyperparams
     parser.add_argument('--epochs',      type=int,   default=200)
-    parser.add_argument('--batch_size',  type=int,   default=4)
+    parser.add_argument('--batch_size',  type=int,   default=8)
     parser.add_argument('--lr',          type=float, default=2e-4)
-    parser.add_argument('--lambda_l1',   type=float, default=200.0,
-                        help='L1 loss weight. Try 50 if blurry; 100-200 often works for maps.')
+    parser.add_argument('--lambda_l1',   type=float, default=100.0,
+                        help='L1 loss weight. Start at 100; try 50 if blurry or 150-200 if noisy.')
     parser.add_argument('--decay_epoch', type=int,   default=100,
                         help='Epoch to start LR linear decay (paper default: 100)')
     parser.add_argument('--save_every',  type=int,   default=10)
@@ -488,7 +488,7 @@ def main():
                         help='Analyze dataset halves and suggest split order before training')
     parser.add_argument('--require_gpu', action='store_true',
                         help='Fail fast if no GPU is visible')
-    parser.add_argument('--label_smoothing', type=float, default=0.1,
+    parser.add_argument('--label_smoothing', type=float, default=0.05,
                         help='One-sided real-label smoothing for discriminator (0.0-0.2)')
     parser.add_argument('--skip_data_check', nargs='?', const=True, default=False, type=str2bool,
                         help='Skip writing data split sanity preview image (true/false)')
@@ -505,6 +505,8 @@ def main():
     if args.batch_size < 4:
         print(f"[WARN] batch_size={args.batch_size} is too low for stable Pix2Pix training; using 4")
         args.batch_size = 4
+    elif args.batch_size < 8:
+        print(f"[WARN] batch_size={args.batch_size} works, but 8 is usually better if GPU memory allows")
 
     args.label_smoothing = max(0.0, min(float(args.label_smoothing), 0.2))
 
