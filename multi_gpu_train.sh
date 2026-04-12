@@ -47,8 +47,12 @@ python src/train.py \
   --label_smoothing 0.05 \
   --label_noise 0.02 \
   --feature_matching_lambda 10 \
+  --perceptual_lambda 10 \
+  --gan_mode lsgan \
   --disc_update_interval 2 \
   --generator_norm instance \
+  --res_blocks 2 \
+  --cache_dataset true \
   --decay_epoch 100 \
   --warmup_epochs 5 \
   --sample_every 5 \
