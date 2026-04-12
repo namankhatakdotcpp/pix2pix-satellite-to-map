@@ -36,13 +36,21 @@ python src/train.py \
   --logdir logs \
   --split_order map_sat \
   --auto_split_detect \
+  --abort_on_split_mismatch true \
   --require_gpu \
+  --mixed_precision true \
   --epochs 200 \
   --batch_size 8 \
   --lr 2e-4 \
   --lambda_l1 100 \
+  --lambda_l1_end 50 \
   --label_smoothing 0.05 \
+  --label_noise 0.02 \
+  --feature_matching_lambda 10 \
+  --disc_update_interval 2 \
+  --generator_norm instance \
   --decay_epoch 100 \
+  --warmup_epochs 5 \
   --sample_every 5 \
   --save_every 10 \
   --eval_every 10 \

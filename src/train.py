@@ -21,11 +21,14 @@ import os
 import argparse
 import time
 import math
+import random
 import numpy as np
 import tensorflow as tf
 import imageio
 from pathlib import Path
+from collections import deque
 from tqdm import tqdm
+from tensorflow.keras import mixed_precision
 
 # Optional: scikit-image for metrics
 try:
@@ -228,64 +231,127 @@ def save_data_check_preview(data_dir, split_order, output_path):
     print(f"[DATA] Saved split-order preview to {output_path} (split_order={split_order})")
 
 
+def save_random_split_samples(data_dir, split_order, output_path, num_samples=5):
+    """Save N random [input,target] sample pairs for manual alignment checks."""
+    files = list_image_files(data_dir)
+    if not files:
+        print(f"[WARN] Random sample preview skipped: no files in {data_dir}")
+        return
+
+    chosen = random.sample(files, k=min(num_samples, len(files)))
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(len(chosen), 2, figsize=(10, 3 * len(chosen)))
+    if len(chosen) == 1:
+        axes = np.array([axes])
+
+    for i, img_path in enumerate(chosen):
+        sat, real_map = load_test_image(img_path, split_order=split_order)
+        axes[i, 0].imshow((sat.numpy() * 0.5 + 0.5).clip(0, 1))
+        axes[i, 0].set_title(f'Input (Satellite) #{i+1}')
+        axes[i, 0].axis('off')
+        axes[i, 1].imshow((real_map.numpy() * 0.5 + 0.5).clip(0, 1))
+        axes[i, 1].set_title(f'Target (Map) #{i+1}')
+        axes[i, 1].axis('off')
+
+    plt.tight_layout()
+    os.makedirs(Path(output_path).parent, exist_ok=True)
+    plt.savefig(output_path, dpi=120, bbox_inches='tight')
+    plt.close()
+    print(f"[DATA] Saved random pair preview to {output_path} ({len(chosen)} samples)")
+
+
+class InstanceNormalization(tf.keras.layers.Layer):
+    """Simple Instance Normalization for generator stability."""
+    def __init__(self, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+
+    def build(self, input_shape):
+        channels = input_shape[-1]
+        self.scale = self.add_weight(
+            name='scale', shape=(channels,), initializer='ones', trainable=True
+        )
+        self.offset = self.add_weight(
+            name='offset', shape=(channels,), initializer='zeros', trainable=True
+        )
+
+    def call(self, inputs):
+        mean, var = tf.nn.moments(inputs, axes=[1, 2], keepdims=True)
+        normalized = (inputs - mean) / tf.sqrt(var + self.epsilon)
+        return self.scale * normalized + self.offset
+
+
 # ─────────────────────────────────────────────
 # MODEL ARCHITECTURE
 # ─────────────────────────────────────────────
 
-def downsample(filters, size, apply_batchnorm=True):
+def _norm_layer(norm_type='batch'):
+    if norm_type == 'instance':
+        return InstanceNormalization()
+    return tf.keras.layers.BatchNormalization()
+
+
+def downsample(filters, size, apply_norm=True, norm_type='batch'):
     init = tf.random_normal_initializer(0., 0.02)
     block = tf.keras.Sequential()
     block.add(tf.keras.layers.Conv2D(
         filters, size, strides=2, padding='same',
         kernel_initializer=init, use_bias=False))
-    if apply_batchnorm:
-        block.add(tf.keras.layers.BatchNormalization())
+    if apply_norm:
+        block.add(_norm_layer(norm_type))
     block.add(tf.keras.layers.LeakyReLU())
     return block
 
 
-def upsample(filters, size, apply_dropout=False):
+def upsample(filters, size, apply_dropout=False, norm_type='batch'):
     init = tf.random_normal_initializer(0., 0.02)
     block = tf.keras.Sequential()
-    block.add(tf.keras.layers.Conv2DTranspose(
-        filters, size, strides=2, padding='same',
+    block.add(tf.keras.layers.UpSampling2D(size=2, interpolation='nearest'))
+    block.add(tf.keras.layers.Conv2D(
+        filters, size, strides=1, padding='same',
         kernel_initializer=init, use_bias=False))
-    block.add(tf.keras.layers.BatchNormalization())
+    block.add(_norm_layer(norm_type))
     if apply_dropout:
         block.add(tf.keras.layers.Dropout(0.5))
     block.add(tf.keras.layers.ReLU())
     return block
 
 
-def build_generator():
+def build_generator(norm_type='instance'):
     """U-Net generator with skip connections."""
     inputs = tf.keras.layers.Input(shape=[256, 256, 3])
     init = tf.random_normal_initializer(0., 0.02)
 
     # Encoder (downsampling)
     down_stack = [
-        downsample(64,  4, apply_batchnorm=False),  # (128, 128, 64)
-        downsample(128, 4),                          # (64, 64, 128)
-        downsample(256, 4),                          # (32, 32, 256)
-        downsample(512, 4),                          # (16, 16, 512)
-        downsample(512, 4),                          # (8, 8, 512)
-        downsample(512, 4),                          # (4, 4, 512)
-        downsample(512, 4),                          # (2, 2, 512)
-        downsample(512, 4),                          # (1, 1, 512)
+        downsample(64,  4, apply_norm=False, norm_type=norm_type),  # (128, 128, 64)
+        downsample(128, 4, norm_type=norm_type),                    # (64, 64, 128)
+        downsample(256, 4, norm_type=norm_type),                    # (32, 32, 256)
+        downsample(512, 4, norm_type=norm_type),                    # (16, 16, 512)
+        downsample(512, 4, norm_type=norm_type),                    # (8, 8, 512)
+        downsample(512, 4, norm_type=norm_type),                    # (4, 4, 512)
+        downsample(512, 4, norm_type=norm_type),                    # (2, 2, 512)
+        downsample(512, 4, norm_type=norm_type),                    # (1, 1, 512)
     ]
     # Decoder (upsampling)
     up_stack = [
-        upsample(512, 4, apply_dropout=True),   # (2, 2, 1024)
-        upsample(512, 4, apply_dropout=True),   # (4, 4, 1024)
-        upsample(512, 4, apply_dropout=True),   # (8, 8, 1024)
-        upsample(512, 4),                       # (16, 16, 1024)
-        upsample(256, 4),                       # (32, 32, 512)
-        upsample(128, 4),                       # (64, 64, 256)
-        upsample(64,  4),                       # (128, 128, 128)
+        upsample(512, 4, apply_dropout=True, norm_type=norm_type),   # (2, 2, 1024)
+        upsample(512, 4, apply_dropout=True, norm_type=norm_type),   # (4, 4, 1024)
+        upsample(512, 4, apply_dropout=True, norm_type=norm_type),   # (8, 8, 1024)
+        upsample(512, 4, norm_type=norm_type),                       # (16, 16, 1024)
+        upsample(256, 4, norm_type=norm_type),                       # (32, 32, 512)
+        upsample(128, 4, norm_type=norm_type),                       # (64, 64, 256)
+        upsample(64,  4, norm_type=norm_type),                       # (128, 128, 128)
     ]
-    last = tf.keras.layers.Conv2DTranspose(
-        3, 4, strides=2, padding='same',
-        kernel_initializer=init, activation='tanh')  # (256, 256, 3)
+    last = tf.keras.Sequential([
+        tf.keras.layers.UpSampling2D(size=2, interpolation='nearest'),
+        tf.keras.layers.Conv2D(3, 4, strides=1, padding='same',
+                               kernel_initializer=init, activation='tanh', dtype='float32')
+    ])
 
     x = inputs
     skips = []
@@ -307,19 +373,19 @@ def build_discriminator():
     init = tf.random_normal_initializer(0., 0.02)
     inp    = tf.keras.layers.Input(shape=[256, 256, 3], name='input_image')
     target = tf.keras.layers.Input(shape=[256, 256, 3], name='target_image')
-    x = tf.keras.layers.Concatenate()([inp, target])  # (256, 256, 6)
-    x = downsample(64,  4, apply_batchnorm=False)(x)  # (128, 128, 64)
-    x = downsample(128, 4)(x)                          # (64, 64, 128)
-    x = downsample(256, 4)(x)                          # (32, 32, 256)
-    x = tf.keras.layers.ZeroPadding2D()(x)             # (34, 34, 256)
+    x = tf.keras.layers.Concatenate()([inp, target])   # (256, 256, 6)
+    f1 = downsample(64,  4, apply_norm=False, norm_type='batch')(x)  # (128, 128, 64)
+    f2 = downsample(128, 4, norm_type='batch')(f1)                    # (64, 64, 128)
+    f3 = downsample(256, 4, norm_type='batch')(f2)                    # (32, 32, 256)
+    x = tf.keras.layers.ZeroPadding2D()(f3)                           # (34, 34, 256)
     x = tf.keras.layers.Conv2D(
         512, 4, strides=1, kernel_initializer=init, use_bias=False)(x)  # (31, 31, 512)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.LeakyReLU()(x)
-    x = tf.keras.layers.ZeroPadding2D()(x)
-    x = tf.keras.layers.Conv2D(
+    f4 = tf.keras.layers.LeakyReLU()(x)
+    x = tf.keras.layers.ZeroPadding2D()(f4)
+    patch = tf.keras.layers.Conv2D(
         1, 4, strides=1, kernel_initializer=init)(x)  # (30, 30, 1)
-    return tf.keras.Model(inputs=[inp, target], outputs=x)
+    return tf.keras.Model(inputs=[inp, target], outputs=[patch, f1, f2, f3, f4])
 
 
 # ─────────────────────────────────────────────
@@ -335,12 +401,28 @@ def generator_loss(disc_generated_output, gen_output, target, lambda_l1=100):
     total    = adv_loss + (lambda_l1 * l1_loss)
     return total, adv_loss, l1_loss
 
-def discriminator_loss(disc_real_output, disc_generated_output, label_smoothing=0.0):
+def discriminator_loss(disc_real_output, disc_generated_output, label_smoothing=0.0, label_noise=0.0):
     """BCE on real + fake with optional one-sided label smoothing."""
     real_target = tf.ones_like(disc_real_output) * (1.0 - label_smoothing)
+    fake_target = tf.zeros_like(disc_generated_output)
+
+    if label_noise > 0.0:
+        real_noise = tf.random.uniform(tf.shape(real_target), minval=-label_noise, maxval=label_noise)
+        fake_noise = tf.random.uniform(tf.shape(fake_target), minval=-label_noise, maxval=label_noise)
+        real_target = tf.clip_by_value(real_target + real_noise, 0.0, 1.0)
+        fake_target = tf.clip_by_value(fake_target + fake_noise, 0.0, 1.0)
+
     real_loss = loss_object(real_target, disc_real_output)
-    fake_loss = loss_object(tf.zeros_like(disc_generated_output), disc_generated_output)
+    fake_loss = loss_object(fake_target, disc_generated_output)
     return real_loss + fake_loss
+
+
+def feature_matching_loss(real_features, fake_features):
+    """L1 feature matching across discriminator intermediate activations."""
+    losses = []
+    for real_f, fake_f in zip(real_features, fake_features):
+        losses.append(tf.reduce_mean(tf.abs(tf.stop_gradient(real_f) - fake_f)))
+    return tf.add_n(losses) / tf.cast(len(losses), tf.float32)
 
 
 # ─────────────────────────────────────────────
@@ -348,23 +430,36 @@ def discriminator_loss(disc_real_output, disc_generated_output, label_smoothing=
 # ─────────────────────────────────────────────
 
 def train_step(satellite, real_map, generator, discriminator,
-               gen_optimizer, disc_optimizer, lambda_l1, label_smoothing=0.0):
+               gen_optimizer, disc_optimizer, lambda_l1, label_smoothing=0.0,
+               label_noise=0.0, fm_lambda=10.0, update_discriminator=True):
     with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
         gen_map = generator(satellite, training=True)
 
-        disc_real = discriminator([satellite, real_map], training=True)
-        disc_fake = discriminator([satellite, gen_map],  training=True)
+        disc_real_outputs = discriminator([satellite, real_map], training=True)
+        disc_fake_outputs = discriminator([satellite, gen_map],  training=True)
+
+        disc_real = disc_real_outputs[0]
+        disc_fake = disc_fake_outputs[0]
+
+        fm_loss = feature_matching_loss(disc_real_outputs[1:], disc_fake_outputs[1:])
 
         gen_total, gen_adv, gen_l1 = generator_loss(disc_fake, gen_map, real_map, lambda_l1)
-        disc_total = discriminator_loss(disc_real, disc_fake, label_smoothing=label_smoothing)
+        gen_total = gen_total + (fm_lambda * fm_loss)
+        disc_total = discriminator_loss(
+            disc_real,
+            disc_fake,
+            label_smoothing=label_smoothing,
+            label_noise=label_noise,
+        )
 
     gen_grads  = gen_tape.gradient(gen_total,  generator.trainable_variables)
     disc_grads = disc_tape.gradient(disc_total, discriminator.trainable_variables)
 
     gen_optimizer.apply_gradients(zip(gen_grads,  generator.trainable_variables))
-    disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
+    if update_discriminator:
+        disc_optimizer.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
 
-    return gen_total, gen_adv, gen_l1, disc_total
+    return gen_total, gen_adv, gen_l1, disc_total, fm_loss
 
 
 # ─────────────────────────────────────────────
@@ -416,6 +511,7 @@ def save_sample(generator, test_ds, results_dir, epoch):
 
     for sat, real_map in test_ds.take(1):
         gen_map = generator(sat, training=False)
+        gen_std = float(tf.math.reduce_std(gen_map[0]).numpy())
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         titles = ['Satellite Input', 'Generated Map', 'Ground Truth']
         imgs   = [sat[0], gen_map[0], real_map[0]]
@@ -428,7 +524,7 @@ def save_sample(generator, test_ds, results_dir, epoch):
         path = os.path.join(results_dir, f'epoch_{epoch:03d}.png')
         plt.savefig(path, dpi=100, bbox_inches='tight')
         plt.close()
-        return path
+        return path, gen_std
 
 
 def make_gif(results_dir, output_path):
@@ -476,20 +572,38 @@ def main():
     parser.add_argument('--lr',          type=float, default=2e-4)
     parser.add_argument('--lambda_l1',   type=float, default=100.0,
                         help='L1 loss weight. Start at 100; try 50 if blurry or 150-200 if noisy.')
+    parser.add_argument('--lambda_l1_end', type=float, default=50.0,
+                        help='Final L1 weight for linear decay from lambda_l1 to lambda_l1_end')
     parser.add_argument('--decay_epoch', type=int,   default=100,
                         help='Epoch to start LR linear decay (paper default: 100)')
+    parser.add_argument('--warmup_epochs', type=int, default=5,
+                        help='Linear LR warmup epochs at start')
     parser.add_argument('--save_every',  type=int,   default=10)
     parser.add_argument('--eval_every',  type=int,   default=10)
-    parser.add_argument('--sample_every', type=int, default=5,
+    parser.add_argument('--sample_every', type=int, default=1,
                         help='Save sample visualization every N epochs')
     parser.add_argument('--split_order', type=str, default='map_sat', choices=['map_sat', 'sat_map'],
                         help='How paired image is arranged: map_sat means left=map,right=satellite; sat_map means left=satellite,right=map')
     parser.add_argument('--auto_split_detect', action='store_true',
                         help='Analyze dataset halves and suggest split order before training')
+    parser.add_argument('--split_confidence_threshold', type=float, default=0.75,
+                        help='Confidence threshold for split-order mismatch abort')
+    parser.add_argument('--abort_on_split_mismatch', nargs='?', const=True, default=True, type=str2bool,
+                        help='Abort if auto-detected split disagrees with selected split_order')
     parser.add_argument('--require_gpu', action='store_true',
                         help='Fail fast if no GPU is visible')
+    parser.add_argument('--mixed_precision', nargs='?', const=True, default=True, type=str2bool,
+                        help='Enable mixed precision on GPU (true/false)')
     parser.add_argument('--label_smoothing', type=float, default=0.05,
                         help='One-sided real-label smoothing for discriminator (0.0-0.2)')
+    parser.add_argument('--label_noise', type=float, default=0.02,
+                        help='Small random label noise for discriminator targets (0.0-0.1)')
+    parser.add_argument('--feature_matching_lambda', type=float, default=10.0,
+                        help='Feature matching loss weight for generator')
+    parser.add_argument('--disc_update_interval', type=int, default=2,
+                        help='Update discriminator every N steps (2 means less frequent D updates)')
+    parser.add_argument('--generator_norm', type=str, default='instance', choices=['instance', 'batch'],
+                        help='Normalization type in generator blocks')
     parser.add_argument('--skip_data_check', nargs='?', const=True, default=False, type=str2bool,
                         help='Skip writing data split sanity preview image (true/false)')
     # Mode
@@ -509,6 +623,18 @@ def main():
         print(f"[WARN] batch_size={args.batch_size} works, but 8 is usually better if GPU memory allows")
 
     args.label_smoothing = max(0.0, min(float(args.label_smoothing), 0.2))
+    args.label_noise = max(0.0, min(float(args.label_noise), 0.1))
+    args.disc_update_interval = max(1, int(args.disc_update_interval))
+    args.warmup_epochs = max(0, int(args.warmup_epochs))
+    args.sample_every = max(1, int(args.sample_every))
+    args.lambda_l1_end = float(args.lambda_l1_end)
+
+    if args.lambda_l1_end > args.lambda_l1:
+        print(
+            f"[WARN] lambda_l1_end ({args.lambda_l1_end}) is greater than lambda_l1 ({args.lambda_l1}); "
+            "using constant lambda_l1"
+        )
+        args.lambda_l1_end = args.lambda_l1
 
     if args.auto_split_detect:
         suggestion = suggest_split_order(args.data_dir, num_samples=50)
@@ -523,6 +649,12 @@ def main():
                 print(
                     f"[WARN] Selected split_order={args.split_order} differs from suggested={suggestion['suggested']}"
                 )
+                if args.abort_on_split_mismatch and suggestion['confidence'] >= args.split_confidence_threshold:
+                    raise RuntimeError(
+                        "Split-order mismatch detected with high confidence. "
+                        f"Suggested={suggestion['suggested']} selected={args.split_order}. "
+                        "Fix --split_order and rerun."
+                    )
 
     # ── Create output directories ──────────────────────────────────────
     for d in [args.results_dir, args.savedir, args.logdir]:
@@ -549,11 +681,23 @@ def main():
         if args.require_gpu:
             raise RuntimeError("--require_gpu was set, but no GPU is visible.")
 
+    if args.mixed_precision and visible_gpus:
+        mixed_precision.set_global_policy('mixed_float16')
+        print("[AMP] Mixed precision enabled (mixed_float16)")
+    else:
+        mixed_precision.set_global_policy('float32')
+
     if not args.skip_data_check:
         save_data_check_preview(
             args.data_dir,
             args.split_order,
             os.path.join('outputs', 'data_split_preview.png'),
+        )
+        save_random_split_samples(
+            args.data_dir,
+            args.split_order,
+            os.path.join('outputs', 'data_split_samples.png'),
+            num_samples=5,
         )
 
     # ── Build datasets ─────────────────────────────────────────────────
@@ -571,7 +715,7 @@ def main():
 
     # ── Build models inside strategy scope ────────────────────────────
     with strategy.scope():
-        generator     = build_generator()
+        generator     = build_generator(norm_type=args.generator_norm)
         discriminator = build_discriminator()
 
         # Optimizers with scalar float LR; decay updates assign into optimizer lr.
@@ -579,7 +723,7 @@ def main():
         disc_optimizer = tf.keras.optimizers.Adam(learning_rate=float(args.lr), beta_1=0.5)
 
     @tf.function
-    def single_train_step(sat_batch, map_batch):
+    def single_train_step(sat_batch, map_batch, lambda_l1_value, update_disc):
         return train_step(
             sat_batch,
             map_batch,
@@ -587,15 +731,18 @@ def main():
             discriminator,
             gen_optimizer,
             disc_optimizer,
-            args.lambda_l1,
+            lambda_l1_value,
             args.label_smoothing,
+            args.label_noise,
+            args.feature_matching_lambda,
+            update_disc,
         )
 
     if args.multi_gpu:
         distributed_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
         @tf.function
-        def distributed_train_step(dist_batch):
+        def distributed_train_step(dist_batch, lambda_l1_value, update_disc):
             def replica_step(sat_batch, map_batch):
                 return train_step(
                     sat_batch,
@@ -604,8 +751,11 @@ def main():
                     discriminator,
                     gen_optimizer,
                     disc_optimizer,
-                    args.lambda_l1,
+                    lambda_l1_value,
                     args.label_smoothing,
+                    args.label_noise,
+                    args.feature_matching_lambda,
+                    update_disc,
                 )
 
             per_replica = strategy.run(replica_step, args=dist_batch)
@@ -613,7 +763,8 @@ def main():
             gen_adv = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[1], axis=None)
             gen_l1 = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[2], axis=None)
             disc_total = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[3], axis=None)
-            return gen_total, gen_adv, gen_l1, disc_total
+            fm_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[4], axis=None)
+            return gen_total, gen_adv, gen_l1, disc_total, fm_loss
     else:
         distributed_train_ds = train_ds
 
@@ -641,18 +792,24 @@ def main():
     # ── Training loop ──────────────────────────────────────────────────
     best_ssim = 0.0
     gif_frames = []
+    collapse_hits = 0
+    gen_loss_window = deque(maxlen=6)
 
     print(f"\n{'='*60}")
     print(f"  Pix2Pix Training — {args.epochs} epochs")
-    print(f"  L1 weight: {args.lambda_l1} | LR: {args.lr}")
+    print(f"  L1 weight: {args.lambda_l1} -> {args.lambda_l1_end} | LR: {args.lr}")
     print(f"  LR decay starts at epoch: {args.decay_epoch}")
     print(f"{'='*60}\n")
 
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
-        # ── LR linear decay (paper-faithful) ──────────────────────────
-        if epoch >= args.decay_epoch:
+        # LR warmup + linear decay
+        if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
+            warmup_lr = args.lr * ((epoch + 1) / args.warmup_epochs)
+            gen_optimizer.learning_rate.assign(warmup_lr)
+            disc_optimizer.learning_rate.assign(warmup_lr)
+        elif epoch >= args.decay_epoch:
             decay_steps = args.epochs - args.decay_epoch
             new_lr = args.lr * (1.0 - (epoch - args.decay_epoch) / max(1, decay_steps))
             new_lr = max(new_lr, 1e-7)
@@ -660,25 +817,40 @@ def main():
             disc_optimizer.learning_rate.assign(new_lr)
 
         current_lr = float(gen_optimizer.learning_rate.numpy())
+        l1_progress = epoch / max(1, args.epochs - 1)
+        lambda_l1_current = args.lambda_l1 + (args.lambda_l1_end - args.lambda_l1) * l1_progress
+        lambda_l1_current = float(max(args.lambda_l1_end, lambda_l1_current))
 
         # ── Batch loop ────────────────────────────────────────────────
         gen_losses, disc_losses = [], []
         gen_l1_losses = []
+        gen_adv_losses = []
+        fm_losses = []
         demo_done = False  # FIX 3: flag to break outer loop in demo mode
 
         pbar = tqdm(enumerate(distributed_train_ds.take(steps_per_epoch)), total=steps_per_epoch,
                     desc=f"Epoch {epoch+1:03d}/{args.epochs}", leave=False)
 
         for step, batch in pbar:
+            update_disc = ((step + 1) % args.disc_update_interval == 0)
             if args.multi_gpu:
-                gen_total, gen_adv, gen_l1, disc_total = distributed_train_step(batch)
+                gen_total, gen_adv, gen_l1, disc_total, fm_loss = distributed_train_step(
+                    batch, tf.constant(lambda_l1_current, dtype=tf.float32), update_disc
+                )
             else:
                 sat_batch, map_batch = batch
-                gen_total, gen_adv, gen_l1, disc_total = single_train_step(sat_batch, map_batch)
+                gen_total, gen_adv, gen_l1, disc_total, fm_loss = single_train_step(
+                    sat_batch,
+                    map_batch,
+                    tf.constant(lambda_l1_current, dtype=tf.float32),
+                    update_disc,
+                )
             # FIX 2: cast tensors to float before string formatting
             gen_losses.append(float(gen_total))
             disc_losses.append(float(disc_total))
             gen_l1_losses.append(float(gen_l1))
+            gen_adv_losses.append(float(gen_adv))
+            fm_losses.append(float(fm_loss))
 
             pbar.set_postfix({
                 'gen': f'{float(gen_total):.4f}',
@@ -699,24 +871,40 @@ def main():
         mean_gen  = float(np.mean(gen_losses))
         mean_disc = float(np.mean(disc_losses))
         mean_l1   = float(np.mean(gen_l1_losses))
+        mean_adv  = float(np.mean(gen_adv_losses))
+        mean_fm   = float(np.mean(fm_losses))
+        gan_l1_ratio = mean_adv / max(1e-8, lambda_l1_current * mean_l1)
         elapsed   = time.time() - t0
 
         print(f"Epoch {epoch+1:03d}/{args.epochs} | "
-              f"gen={mean_gen:.4f} disc={mean_disc:.4f} l1={mean_l1:.4f} | "
-              f"lr={current_lr:.2e} | {elapsed:.1f}s")
+              f"gen={mean_gen:.4f} disc={mean_disc:.4f} l1={mean_l1:.4f} "
+              f"adv={mean_adv:.4f} fm={mean_fm:.4f} ratio={gan_l1_ratio:.4f} | "
+              f"lr={current_lr:.2e} lambda={lambda_l1_current:.1f} | {elapsed:.1f}s")
 
         # ── TensorBoard ───────────────────────────────────────────────
         with summary_writer.as_default():
             tf.summary.scalar('loss/generator',     mean_gen,  step=epoch)
             tf.summary.scalar('loss/discriminator', mean_disc, step=epoch)
             tf.summary.scalar('loss/l1',            mean_l1,   step=epoch)
+            tf.summary.scalar('loss/adv',           mean_adv,  step=epoch)
+            tf.summary.scalar('loss/feature_matching', mean_fm, step=epoch)
+            tf.summary.scalar('loss/gan_l1_ratio',  gan_l1_ratio, step=epoch)
             tf.summary.scalar('lr/generator',       current_lr, step=epoch)
+            tf.summary.scalar('lambda/l1',          lambda_l1_current, step=epoch)
 
         # ── Save sample image ─────────────────────────────────────────
         if (epoch + 1) % args.sample_every == 0 or epoch == 0:
-            frame_path = save_sample(generator, test_ds, args.results_dir, epoch + 1)
-            if frame_path:
+            result = save_sample(generator, test_ds, args.results_dir, epoch + 1)
+            if result:
+                frame_path, gen_std = result
                 gif_frames.append(frame_path)
+                if gen_std < 0.015:
+                    collapse_hits += 1
+                    print(f"[WARN] Low output variance detected (std={gen_std:.5f})")
+                    if collapse_hits >= 3 and (epoch + 1) >= 10:
+                        raise RuntimeError(
+                            "Model collapse suspected: generated outputs are nearly constant across epochs."
+                        )
 
         # ── Evaluate metrics ──────────────────────────────────────────
         if (epoch + 1) % args.eval_every == 0:
@@ -735,6 +923,21 @@ def main():
                     best_path = os.path.join(args.savedir, 'best_generator')
                     save_saved_model(generator, best_path)
                     print(f"  [BEST] New best SSIM={best_ssim:.4f} → saved to {best_path}")
+
+                if (epoch + 1) >= 10 and metrics['SSIM'] < 0.10:
+                    raise RuntimeError(
+                        f"SSIM remains too low ({metrics['SSIM']:.4f}) at epoch {epoch+1}. "
+                        "Likely split/data mismatch or collapsed training."
+                    )
+
+        gen_loss_window.append(mean_gen)
+        if len(gen_loss_window) == gen_loss_window.maxlen:
+            if (max(gen_loss_window) - min(gen_loss_window)) < 0.02 and (epoch + 1) >= 15:
+                new_lr = max(current_lr * 0.5, 1e-7)
+                if new_lr < current_lr:
+                    gen_optimizer.learning_rate.assign(new_lr)
+                    disc_optimizer.learning_rate.assign(new_lr)
+                    print(f"[ADAPT] Generator loss stagnation detected. Lowering LR to {new_lr:.2e}")
 
         # ── Checkpoint ────────────────────────────────────────────────
         if (epoch + 1) % args.save_every == 0:
