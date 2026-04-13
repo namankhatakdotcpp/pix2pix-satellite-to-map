@@ -22,6 +22,13 @@ from collections import deque
 from tqdm import tqdm
 
 try:
+    from tensorflow_addons.layers import SpectralNormalization
+    TFA_AVAILABLE = True
+except Exception:
+    SpectralNormalization = None
+    TFA_AVAILABLE = False
+
+try:
     from skimage.metrics import structural_similarity as ssim_fn
     from skimage.metrics import peak_signal_noise_ratio as psnr_fn
     METRICS_AVAILABLE = True
@@ -235,7 +242,7 @@ def build_generator(norm_type='instance'):
     return tf.keras.Model(inputs=inputs, outputs=last(x))
 
 
-def build_discriminator():
+def build_discriminator(use_spectral_norm=False):
     """Stable PatchGAN using LayerNorm and reduced depth.
 
     Returns [patch_output, f1, f2, f3, f4] so feature matching stays active.
@@ -246,8 +253,14 @@ def build_discriminator():
     tar = tf.keras.layers.Input(shape=[256, 256, 3], name='target_image')
     x = tf.keras.layers.Concatenate()([inp, tar])
 
+    def conv2d(*args, **kwargs):
+        layer = tf.keras.layers.Conv2D(*args, **kwargs)
+        if use_spectral_norm:
+            return SpectralNormalization(layer)
+        return layer
+
     def disc_downsample(x_in, filters, size, apply_norm=True):
-        y = tf.keras.layers.Conv2D(
+        y = conv2d(
             filters,
             size,
             strides=2,
@@ -265,7 +278,7 @@ def build_discriminator():
     f2 = disc_downsample(f1, 128, 4, apply_norm=True)
     f3 = disc_downsample(f2, 256, 4, apply_norm=True)
 
-    x = tf.keras.layers.Conv2D(
+    x = conv2d(
         512,
         4,
         strides=1,
@@ -276,7 +289,7 @@ def build_discriminator():
     x = tf.keras.layers.LayerNormalization()(x)
     f4 = tf.keras.layers.LeakyReLU(0.2)(x)
 
-    patch = tf.keras.layers.Conv2D(
+    patch = conv2d(
         1,
         4,
         strides=1,
@@ -307,8 +320,16 @@ def generator_loss(disc_fake_patch, gen_output, target, lambda_l1=100.0, gan_mod
 
 def discriminator_loss(disc_real_patch, disc_fake_patch,
                        label_smoothing=0.1, label_noise=0.02, gan_mode='lsgan'):
-    real_label = tf.ones_like(disc_real_patch) * (1.0 - label_smoothing)
-    fake_label = tf.zeros_like(disc_fake_patch) + label_smoothing
+    real_p = tf.cast(disc_real_patch, tf.float32)
+    fake_p = tf.cast(disc_fake_patch, tf.float32)
+
+    if gan_mode == 'lsgan':
+        real_loss = tf.reduce_mean(tf.square(real_p - 1.0))
+        fake_loss = tf.reduce_mean(tf.square(fake_p))
+        return 0.5 * (real_loss + fake_loss)
+
+    real_label = tf.ones_like(real_p) * (1.0 - label_smoothing)
+    fake_label = tf.zeros_like(fake_p) + label_smoothing
 
     if label_noise > 0:
         real_label = tf.clip_by_value(
@@ -321,14 +342,6 @@ def discriminator_loss(disc_real_patch, disc_fake_patch,
             0.0,
             1.0,
         )
-
-    real_p = tf.cast(disc_real_patch, tf.float32)
-    fake_p = tf.cast(disc_fake_patch, tf.float32)
-
-    if gan_mode == 'lsgan':
-        real_loss = tf.reduce_mean(tf.square(real_p - real_label))
-        fake_loss = tf.reduce_mean(tf.square(fake_p - fake_label))
-        return 0.5 * (real_loss + fake_loss)
 
     real_loss = bce_loss(real_label, real_p)
     fake_loss = bce_loss(fake_label, fake_p)
@@ -374,11 +387,10 @@ def train_step(satellite, real_map, generator, discriminator,
                gen_opt, disc_opt, lambda_l1, label_smoothing, label_noise,
                fm_lambda, perc_model, perc_lambda, gan_mode, update_disc,
                gen_updates=2, disc_input_noise_std=0.05):
-    def add_disc_noise(x):
+    def add_noise(x):
         if disc_input_noise_std <= 0:
             return x
-        noise = tf.random.normal(tf.shape(x), stddev=disc_input_noise_std, dtype=x.dtype)
-        return tf.clip_by_value(x + noise, -1.0, 1.0)
+        return x + tf.random.normal(tf.shape(x), mean=0.0, stddev=disc_input_noise_std, dtype=x.dtype)
 
     # Default tensors for logging in case generator updates are skipped.
     gen_total = tf.constant(0.0, dtype=tf.float32)
@@ -392,11 +404,10 @@ def train_step(satellite, real_map, generator, discriminator,
         with tf.GradientTape() as gt:
             gen_map = generator(satellite, training=True)
 
-            noisy_satellite = add_disc_noise(satellite)
-            noisy_real_map = add_disc_noise(real_map)
-            noisy_fake_map = add_disc_noise(gen_map)
-            disc_real_out = discriminator([noisy_satellite, noisy_real_map], training=True)
-            disc_fake_out = discriminator([noisy_satellite, noisy_fake_map], training=True)
+            real_input = add_noise(real_map)
+            fake_input = add_noise(gen_map)
+            disc_real_out = discriminator([satellite, real_input], training=True)
+            disc_fake_out = discriminator([satellite, fake_input], training=True)
 
             real_patch = disc_real_out[0]
             fake_patch = disc_fake_out[0]
@@ -424,12 +435,11 @@ def train_step(satellite, real_map, generator, discriminator,
     # Train discriminator once.
     with tf.GradientTape() as dt:
         gen_map_disc = generator(satellite, training=True)
-        noisy_satellite = add_disc_noise(satellite)
-        noisy_real_map = add_disc_noise(real_map)
-        noisy_fake_map = add_disc_noise(gen_map_disc)
+        real_input = add_noise(real_map)
+        fake_input = add_noise(gen_map_disc)
 
-        disc_real_out = discriminator([noisy_satellite, noisy_real_map], training=True)
-        disc_fake_out = discriminator([noisy_satellite, noisy_fake_map], training=True)
+        disc_real_out = discriminator([satellite, real_input], training=True)
+        disc_fake_out = discriminator([satellite, fake_input], training=True)
         disc_total = discriminator_loss(
             disc_real_out[0],
             disc_fake_out[0],
@@ -560,6 +570,8 @@ def main():
     # Architecture
     ap.add_argument('--generator_norm', default='instance', choices=['instance', 'batch'])
     ap.add_argument('--res_blocks', type=int, default=0)
+    ap.add_argument('--spectral_norm', action='store_true',
+                    help='Use spectral normalization in discriminator Conv2D layers (requires tensorflow-addons).')
 
     # Dataset
     ap.add_argument('--split_order', default='map_sat', choices=['map_sat', 'sat_map'])
@@ -632,7 +644,10 @@ def main():
 
     with strategy.scope():
         generator = build_generator(norm_type=args.generator_norm)
-        discriminator = build_discriminator()
+        if args.spectral_norm and not TFA_AVAILABLE:
+            print("[WARN] --spectral_norm requested but tensorflow-addons is unavailable. Continuing without spectral norm.")
+            args.spectral_norm = False
+        discriminator = build_discriminator(use_spectral_norm=args.spectral_norm)
 
         perc_model = None
         if args.perceptual_lambda > 0:
@@ -678,6 +693,7 @@ def main():
     print(f"  Pix2Pix | {args.epochs} epochs | L1={args.lambda_l1}")
     print(f"  perceptual={args.perceptual_lambda} | fm={args.feature_matching_lambda}")
     print(f"  gen_lr={args.gen_lr} | disc_lr={args.disc_lr} | G:D={max(1,args.gen_updates)}:1")
+    print(f"  spectral_norm={args.spectral_norm}")
     print(f"  gan_mode={args.gan_mode} | norm={args.generator_norm}")
     print(f"{'=' * 60}\n")
 
