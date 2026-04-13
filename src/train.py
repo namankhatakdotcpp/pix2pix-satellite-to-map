@@ -236,24 +236,56 @@ def build_generator(norm_type='instance'):
 
 
 def build_discriminator():
-    """PatchGAN. Returns [patch_output, f1, f2, f3, f4] for optional feature matching."""
-    init = tf.random_normal_initializer(0., 0.02)
+    """Stable PatchGAN using LayerNorm and reduced depth.
+
+    Returns [patch_output, f1, f2, f3, f4] so feature matching stays active.
+    """
+    initializer = tf.random_normal_initializer(0., 0.02)
+
     inp = tf.keras.layers.Input(shape=[256, 256, 3], name='input_image')
-    target = tf.keras.layers.Input(shape=[256, 256, 3], name='target_image')
-    x = tf.keras.layers.Concatenate()([inp, target])
+    tar = tf.keras.layers.Input(shape=[256, 256, 3], name='target_image')
+    x = tf.keras.layers.Concatenate()([inp, tar])
 
-    f1 = downsample(64, 4, apply_norm=False)(x)
-    f2 = downsample(128, 4)(f1)
-    f3 = downsample(256, 4)(f2)
+    def disc_downsample(x_in, filters, size, apply_norm=True):
+        y = tf.keras.layers.Conv2D(
+            filters,
+            size,
+            strides=2,
+            padding='same',
+            kernel_initializer=initializer,
+            use_bias=not apply_norm,
+        )(x_in)
+        if apply_norm:
+            y = tf.keras.layers.LayerNormalization()(y)
+        y = tf.keras.layers.LeakyReLU(0.2)(y)
+        return y
 
-    x = tf.keras.layers.ZeroPadding2D()(f3)
-    x = tf.keras.layers.Conv2D(512, 4, strides=1, kernel_initializer=init, use_bias=False)(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    f4 = tf.keras.layers.LeakyReLU()(x)
-    x = tf.keras.layers.ZeroPadding2D()(f4)
-    patch = tf.keras.layers.Conv2D(1, 4, strides=1, kernel_initializer=init, dtype='float32')(x)
+    # First block intentionally has no normalization.
+    f1 = disc_downsample(x, 64, 4, apply_norm=False)
+    f2 = disc_downsample(f1, 128, 4, apply_norm=True)
+    f3 = disc_downsample(f2, 256, 4, apply_norm=True)
 
-    return tf.keras.Model(inputs=[inp, target], outputs=[patch, f1, f2, f3, f4])
+    x = tf.keras.layers.Conv2D(
+        512,
+        4,
+        strides=1,
+        padding='same',
+        kernel_initializer=initializer,
+        use_bias=False,
+    )(f3)
+    x = tf.keras.layers.LayerNormalization()(x)
+    f4 = tf.keras.layers.LeakyReLU(0.2)(x)
+
+    patch = tf.keras.layers.Conv2D(
+        1,
+        4,
+        strides=1,
+        padding='same',
+        kernel_initializer=initializer,
+        dtype='float32',
+    )(f4)
+
+    return tf.keras.Model(inputs=[inp, tar], outputs=[patch, f1, f2, f3, f4])
 
 
 # -------------------------------------------------
@@ -360,10 +392,11 @@ def train_step(satellite, real_map, generator, discriminator,
         with tf.GradientTape() as gt:
             gen_map = generator(satellite, training=True)
 
+            noisy_satellite = add_disc_noise(satellite)
             noisy_real_map = add_disc_noise(real_map)
             noisy_fake_map = add_disc_noise(gen_map)
-            disc_real_out = discriminator([satellite, noisy_real_map], training=True)
-            disc_fake_out = discriminator([satellite, noisy_fake_map], training=True)
+            disc_real_out = discriminator([noisy_satellite, noisy_real_map], training=True)
+            disc_fake_out = discriminator([noisy_satellite, noisy_fake_map], training=True)
 
             real_patch = disc_real_out[0]
             fake_patch = disc_fake_out[0]
@@ -391,11 +424,12 @@ def train_step(satellite, real_map, generator, discriminator,
     # Train discriminator once.
     with tf.GradientTape() as dt:
         gen_map_disc = generator(satellite, training=True)
+        noisy_satellite = add_disc_noise(satellite)
         noisy_real_map = add_disc_noise(real_map)
         noisy_fake_map = add_disc_noise(gen_map_disc)
 
-        disc_real_out = discriminator([satellite, noisy_real_map], training=True)
-        disc_fake_out = discriminator([satellite, noisy_fake_map], training=True)
+        disc_real_out = discriminator([noisy_satellite, noisy_real_map], training=True)
+        disc_fake_out = discriminator([noisy_satellite, noisy_fake_map], training=True)
         disc_total = discriminator_loss(
             disc_real_out[0],
             disc_fake_out[0],
