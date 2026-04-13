@@ -274,22 +274,32 @@ def generator_loss(disc_fake_patch, gen_output, target, lambda_l1=100.0, gan_mod
 
 
 def discriminator_loss(disc_real_patch, disc_fake_patch,
-                       label_smoothing=0.05, label_noise=0.02, gan_mode='lsgan'):
-    real_label = 1.0 - label_smoothing
+                       label_smoothing=0.1, label_noise=0.02, gan_mode='lsgan'):
+    real_label = tf.ones_like(disc_real_patch) * (1.0 - label_smoothing)
+    fake_label = tf.zeros_like(disc_fake_patch) + label_smoothing
+
     if label_noise > 0:
-        real_label += tf.random.uniform((), -label_noise, label_noise)
-        real_label = tf.clip_by_value(real_label, 0.0, 1.0)
+        real_label = tf.clip_by_value(
+            real_label + tf.random.uniform(tf.shape(real_label), -label_noise, label_noise),
+            0.0,
+            1.0,
+        )
+        fake_label = tf.clip_by_value(
+            fake_label + tf.random.uniform(tf.shape(fake_label), -label_noise, label_noise),
+            0.0,
+            1.0,
+        )
 
     real_p = tf.cast(disc_real_patch, tf.float32)
     fake_p = tf.cast(disc_fake_patch, tf.float32)
 
     if gan_mode == 'lsgan':
         real_loss = tf.reduce_mean(tf.square(real_p - real_label))
-        fake_loss = tf.reduce_mean(tf.square(fake_p))
+        fake_loss = tf.reduce_mean(tf.square(fake_p - fake_label))
         return 0.5 * (real_loss + fake_loss)
 
-    real_loss = bce_loss(tf.ones_like(real_p) * real_label, real_p)
-    fake_loss = bce_loss(tf.zeros_like(fake_p), fake_p)
+    real_loss = bce_loss(real_label, real_p)
+    fake_loss = bce_loss(fake_label, fake_p)
     return real_loss + fake_loss
 
 
@@ -330,47 +340,71 @@ def feature_matching_loss_fn(real_feats, fake_feats):
 @tf.function
 def train_step(satellite, real_map, generator, discriminator,
                gen_opt, disc_opt, lambda_l1, label_smoothing, label_noise,
-               fm_lambda, perc_model, perc_lambda, gan_mode, update_disc):
-    with tf.GradientTape() as gt, tf.GradientTape() as dt:
-        gen_map = generator(satellite, training=True)
+               fm_lambda, perc_model, perc_lambda, gan_mode, update_disc,
+               gen_updates=2, disc_input_noise_std=0.05):
+    def add_disc_noise(x):
+        if disc_input_noise_std <= 0:
+            return x
+        noise = tf.random.normal(tf.shape(x), stddev=disc_input_noise_std, dtype=x.dtype)
+        return tf.clip_by_value(x + noise, -1.0, 1.0)
 
-        disc_real_out = discriminator([satellite, real_map], training=True)
-        disc_fake_out = discriminator([satellite, gen_map], training=True)
+    # Default tensors for logging in case generator updates are skipped.
+    gen_total = tf.constant(0.0, dtype=tf.float32)
+    gen_adv = tf.constant(0.0, dtype=tf.float32)
+    gen_l1 = tf.constant(0.0, dtype=tf.float32)
+    fm = tf.constant(0.0, dtype=tf.float32)
+    perc = tf.constant(0.0, dtype=tf.float32)
 
-        real_patch = disc_real_out[0]
-        fake_patch = disc_fake_out[0]
+    # Train generator multiple times before each discriminator update (G:D = 2:1 by default).
+    for _ in range(max(1, gen_updates)):
+        with tf.GradientTape() as gt:
+            gen_map = generator(satellite, training=True)
 
-        gen_total, gen_adv, gen_l1 = generator_loss(
-            fake_patch,
-            gen_map,
-            real_map,
-            lambda_l1,
-            gan_mode,
-        )
+            noisy_real_map = add_disc_noise(real_map)
+            noisy_fake_map = add_disc_noise(gen_map)
+            disc_real_out = discriminator([satellite, noisy_real_map], training=True)
+            disc_fake_out = discriminator([satellite, noisy_fake_map], training=True)
 
-        # Optional: feature matching
-        if fm_lambda > 0:
-            fm = feature_matching_loss_fn(disc_real_out[1:], disc_fake_out[1:])
-            gen_total = gen_total + fm_lambda * fm
-        else:
-            fm = tf.constant(0.0)
+            real_patch = disc_real_out[0]
+            fake_patch = disc_fake_out[0]
 
-        # Optional: perceptual
-        perc = perceptual_loss_fn(perc_model, real_map, gen_map)
-        gen_total = gen_total + perc_lambda * perc
+            gen_total, gen_adv, gen_l1 = generator_loss(
+                fake_patch,
+                gen_map,
+                real_map,
+                lambda_l1,
+                gan_mode,
+            )
 
+            if fm_lambda > 0:
+                fm = feature_matching_loss_fn(disc_real_out[1:], disc_fake_out[1:])
+                gen_total = gen_total + fm_lambda * fm
+            else:
+                fm = tf.constant(0.0, dtype=tf.float32)
+
+            perc = perceptual_loss_fn(perc_model, real_map, gen_map)
+            gen_total = gen_total + perc_lambda * perc
+
+        gen_grads = gt.gradient(gen_total, generator.trainable_variables)
+        gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
+
+    # Train discriminator once.
+    with tf.GradientTape() as dt:
+        gen_map_disc = generator(satellite, training=True)
+        noisy_real_map = add_disc_noise(real_map)
+        noisy_fake_map = add_disc_noise(gen_map_disc)
+
+        disc_real_out = discriminator([satellite, noisy_real_map], training=True)
+        disc_fake_out = discriminator([satellite, noisy_fake_map], training=True)
         disc_total = discriminator_loss(
-            real_patch,
-            fake_patch,
+            disc_real_out[0],
+            disc_fake_out[0],
             label_smoothing,
             label_noise,
             gan_mode,
         )
 
-    gen_grads = gt.gradient(gen_total, generator.trainable_variables)
     disc_grads = dt.gradient(disc_total, discriminator.trainable_variables)
-
-    gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
     if update_disc:
         disc_opt.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
 
@@ -465,9 +499,12 @@ def main():
     # Hyperparams
     ap.add_argument('--epochs', type=int, default=200)
     ap.add_argument('--batch_size', type=int, default=1)
-    ap.add_argument('--lr', type=float, default=2e-4)
-    ap.add_argument('--lambda_l1', type=float, default=100.0)
-    ap.add_argument('--lambda_l1_end', type=float, default=100.0)
+    ap.add_argument('--lr', type=float, default=None,
+                    help='Legacy single LR. If set, overrides both gen_lr and disc_lr.')
+    ap.add_argument('--gen_lr', type=float, default=2e-4)
+    ap.add_argument('--disc_lr', type=float, default=1e-4)
+    ap.add_argument('--lambda_l1', type=float, default=50.0)
+    ap.add_argument('--lambda_l1_end', type=float, default=50.0)
     ap.add_argument('--decay_epoch', type=int, default=100)
     ap.add_argument('--warmup_epochs', type=int, default=5)
     ap.add_argument('--save_every', type=int, default=10)
@@ -475,12 +512,16 @@ def main():
     ap.add_argument('--sample_every', type=int, default=1)
 
     # Loss knobs
-    ap.add_argument('--perceptual_lambda', type=float, default=1.0)
-    ap.add_argument('--feature_matching_lambda', type=float, default=0.0)
+    ap.add_argument('--perceptual_lambda', '--lambda_perc', dest='perceptual_lambda', type=float, default=5.0)
+    ap.add_argument('--feature_matching_lambda', '--lambda_fm', dest='feature_matching_lambda', type=float, default=10.0)
     ap.add_argument('--gan_mode', default='lsgan', choices=['lsgan', 'bce'])
-    ap.add_argument('--label_smoothing', type=float, default=0.05)
+    ap.add_argument('--label_smoothing', type=float, default=0.1)
     ap.add_argument('--label_noise', type=float, default=0.02)
     ap.add_argument('--disc_update_interval', type=int, default=1)
+    ap.add_argument('--gen_updates', type=int, default=2,
+                    help='Number of generator updates per discriminator update')
+    ap.add_argument('--disc_input_noise_std', type=float, default=0.05,
+                    help='Gaussian noise stddev added to discriminator real/fake inputs')
 
     # Architecture
     ap.add_argument('--generator_norm', default='instance', choices=['instance', 'batch'])
@@ -496,9 +537,14 @@ def main():
     ap.add_argument('--restore', action='store_true')
     ap.add_argument('--export', action='store_true')
     ap.add_argument('--multi_gpu', action='store_true')
+    ap.add_argument('--require_gpu', action='store_true')
     ap.add_argument('--mixed_precision', action='store_true', default=False)
 
     args = ap.parse_args()
+
+    if args.lr is not None:
+        args.gen_lr = float(args.lr)
+        args.disc_lr = float(args.lr)
 
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 
@@ -511,6 +557,8 @@ def main():
     print(f"[GPU] Detected: {len(gpus)} GPU(s)")
     if not gpus:
         print("[WARN] No GPUs found - running on CPU. Training will be slow.")
+        if args.require_gpu:
+            raise RuntimeError("--require_gpu set but no GPU is visible to TensorFlow")
 
     if args.multi_gpu and len(gpus) > 1:
         strategy = tf.distribute.MirroredStrategy()
@@ -567,8 +615,8 @@ def main():
                 print(f"[WARN] VGG19 unavailable ({e}), perceptual_lambda=0")
                 args.perceptual_lambda = 0.0
 
-        gen_opt = tf.keras.optimizers.Adam(args.lr, beta_1=0.5)
-        disc_opt = tf.keras.optimizers.Adam(args.lr, beta_1=0.5)
+        gen_opt = tf.keras.optimizers.Adam(args.gen_lr, beta_1=0.5)
+        disc_opt = tf.keras.optimizers.Adam(args.disc_lr, beta_1=0.5)
 
     ckpt = tf.train.Checkpoint(
         generator=generator,
@@ -595,6 +643,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"  Pix2Pix | {args.epochs} epochs | L1={args.lambda_l1}")
     print(f"  perceptual={args.perceptual_lambda} | fm={args.feature_matching_lambda}")
+    print(f"  gen_lr={args.gen_lr} | disc_lr={args.disc_lr} | G:D={max(1,args.gen_updates)}:1")
     print(f"  gan_mode={args.gan_mode} | norm={args.generator_norm}")
     print(f"{'=' * 60}\n")
 
@@ -603,14 +652,17 @@ def main():
 
         # LR schedule: warmup then linear decay
         if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
-            lr_now = args.lr * ((epoch + 1) / args.warmup_epochs)
+            gen_lr_now = args.gen_lr * ((epoch + 1) / args.warmup_epochs)
+            disc_lr_now = args.disc_lr * ((epoch + 1) / args.warmup_epochs)
         elif epoch >= args.decay_epoch:
             decay_frac = (epoch - args.decay_epoch) / max(1, args.epochs - args.decay_epoch)
-            lr_now = max(args.lr * (1.0 - decay_frac), 1e-7)
+            gen_lr_now = max(args.gen_lr * (1.0 - decay_frac), 1e-7)
+            disc_lr_now = max(args.disc_lr * (1.0 - decay_frac), 1e-7)
         else:
-            lr_now = args.lr
-        gen_opt.learning_rate.assign(lr_now)
-        disc_opt.learning_rate.assign(lr_now)
+            gen_lr_now = args.gen_lr
+            disc_lr_now = args.disc_lr
+        gen_opt.learning_rate.assign(gen_lr_now)
+        disc_opt.learning_rate.assign(disc_lr_now)
 
         # L1 schedule (optional decay)
         l1_frac = epoch / max(1, args.epochs - 1)
@@ -644,6 +696,8 @@ def main():
                 args.perceptual_lambda,
                 args.gan_mode,
                 update_disc,
+                args.gen_updates,
+                args.disc_input_noise_std,
             )
 
             gen_ls.append(float(gt))
@@ -675,7 +729,7 @@ def main():
         print(
             f"Epoch {epoch + 1:03d}/{args.epochs} | "
             f"gen={mg:.4f} disc={md:.4f} l1={ml:.4f} adv={ma:.4f} "
-            f"fm={mf:.4f} perc={mp:.4f} | lr={lr_now:.2e} | {elapsed:.1f}s"
+            f"fm={mf:.4f} perc={mp:.4f} | gen_lr={gen_lr_now:.2e} disc_lr={disc_lr_now:.2e} | {elapsed:.1f}s"
         )
 
         if epoch >= 4 and md < 0.10:
@@ -686,7 +740,10 @@ def main():
             tf.summary.scalar('loss/disc', md, step=epoch)
             tf.summary.scalar('loss/l1', ml, step=epoch)
             tf.summary.scalar('loss/adv', ma, step=epoch)
-            tf.summary.scalar('lr', lr_now, step=epoch)
+            tf.summary.scalar('loss/fm', mf, step=epoch)
+            tf.summary.scalar('loss/perc', mp, step=epoch)
+            tf.summary.scalar('lr/gen', gen_lr_now, step=epoch)
+            tf.summary.scalar('lr/disc', disc_lr_now, step=epoch)
 
         if (epoch + 1) % args.sample_every == 0 or epoch == 0:
             save_sample(generator, test_ds, args.results_dir, epoch + 1)
@@ -713,10 +770,11 @@ def main():
         loss_window.append(mg)
         if len(loss_window) == loss_window.maxlen and epoch >= 15:
             if (max(loss_window) - min(loss_window)) < 0.02:
-                new_lr = max(lr_now * 0.5, 1e-7)
-                gen_opt.learning_rate.assign(new_lr)
-                disc_opt.learning_rate.assign(new_lr)
-                print(f"  [ADAPT] Loss stagnant - LR -> {new_lr:.2e}")
+                new_gen_lr = max(gen_lr_now * 0.5, 1e-7)
+                new_disc_lr = max(disc_lr_now * 0.5, 1e-7)
+                gen_opt.learning_rate.assign(new_gen_lr)
+                disc_opt.learning_rate.assign(new_disc_lr)
+                print(f"  [ADAPT] Loss stagnant - gen_lr -> {new_gen_lr:.2e}, disc_lr -> {new_disc_lr:.2e}")
 
         if (epoch + 1) % args.save_every == 0:
             print(f"  [CKPT] {mgr.save()}")

@@ -45,18 +45,22 @@ echo ""
   --logdir logs_v2 \
   --split_order map_sat \
   --epochs 200 \
-  --batch_size 1 \
-  --lr 2e-4 \
-  --lambda_l1 100 \
-  --lambda_l1_end 100 \
+  --batch_size 8 \
+  --gen_lr 2e-4 \
+  --disc_lr 1e-4 \
+  --lambda_l1 50 \
+  --lambda_l1_end 50 \
   --decay_epoch 100 \
   --warmup_epochs 5 \
-  --perceptual_lambda 1 \
-  --feature_matching_lambda 0 \
+  --lambda_perc 5 \
+  --lambda_fm 10 \
   --gan_mode lsgan \
-  --label_smoothing 0.05 \
+  --label_smoothing 0.1 \
   --label_noise 0.02 \
   --disc_update_interval 1 \
+  --gen_updates 2 \
+  --disc_input_noise_std 0.05 \
+  --require_gpu \
   --generator_norm instance \
   --res_blocks 0 \
   --cache_dataset true \
