@@ -386,7 +386,7 @@ def feature_matching_loss_fn(real_feats, fake_feats):
 def train_step(satellite, real_map, generator, discriminator,
                gen_opt, disc_opt, lambda_l1, label_smoothing, label_noise,
                fm_lambda, perc_model, perc_lambda, gan_mode, update_disc,
-               gen_updates=2, disc_input_noise_std=0.05):
+               gen_updates=1, disc_input_noise_std=0.05):
     def add_noise(x):
         if disc_input_noise_std <= 0:
             return x
@@ -399,15 +399,16 @@ def train_step(satellite, real_map, generator, discriminator,
     fm = tf.constant(0.0, dtype=tf.float32)
     perc = tf.constant(0.0, dtype=tf.float32)
 
-    # Train generator multiple times before each discriminator update (G:D = 2:1 by default).
+    # Train generator (gen_updates passes per disc update).
     for _ in range(max(1, gen_updates)):
         with tf.GradientTape() as gt:
             gen_map = generator(satellite, training=True)
 
             real_input = add_noise(real_map)
             fake_input = add_noise(gen_map)
-            disc_real_out = discriminator([satellite, real_input], training=True)
-            disc_fake_out = discriminator([satellite, fake_input], training=True)
+            # Discriminator in inference mode: no stochastic behavior during gen update.
+            disc_real_out = discriminator([satellite, real_input], training=False)
+            disc_fake_out = discriminator([satellite, fake_input], training=False)
 
             real_patch = disc_real_out[0]
             fake_patch = disc_fake_out[0]
@@ -432,9 +433,10 @@ def train_step(satellite, real_map, generator, discriminator,
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
 
-    # Train discriminator once.
+    # Train discriminator once, reusing the last generated image (consistent with gen step).
     with tf.GradientTape() as dt:
-        gen_map_disc = generator(satellite, training=True)
+        # stop_gradient: discriminator trains on gen output as a fixed sample.
+        gen_map_disc = tf.stop_gradient(tf.cast(gen_map, tf.float32))
         real_input = add_noise(real_map)
         fake_input = add_noise(gen_map_disc)
 
@@ -547,8 +549,8 @@ def main():
                     help='Legacy single LR. If set, overrides both gen_lr and disc_lr.')
     ap.add_argument('--gen_lr', type=float, default=2e-4)
     ap.add_argument('--disc_lr', type=float, default=1e-4)
-    ap.add_argument('--lambda_l1', type=float, default=50.0)
-    ap.add_argument('--lambda_l1_end', type=float, default=50.0)
+    ap.add_argument('--lambda_l1', type=float, default=100.0)
+    ap.add_argument('--lambda_l1_end', type=float, default=100.0)
     ap.add_argument('--decay_epoch', type=int, default=100)
     ap.add_argument('--warmup_epochs', type=int, default=5)
     ap.add_argument('--save_every', type=int, default=10)
@@ -556,8 +558,8 @@ def main():
     ap.add_argument('--sample_every', type=int, default=1)
 
     # Loss knobs
-    ap.add_argument('--perceptual_lambda', '--lambda_perc', dest='perceptual_lambda', type=float, default=5.0)
-    ap.add_argument('--feature_matching_lambda', '--lambda_fm', dest='feature_matching_lambda', type=float, default=10.0)
+    ap.add_argument('--perceptual_lambda', '--lambda_perc', dest='perceptual_lambda', type=float, default=2.0)
+    ap.add_argument('--feature_matching_lambda', '--lambda_fm', dest='feature_matching_lambda', type=float, default=5.0)
     ap.add_argument('--gan_mode', default='lsgan', choices=['lsgan', 'bce'])
     ap.add_argument('--label_smoothing', type=float, default=0.1)
     ap.add_argument('--label_noise', type=float, default=0.02)
@@ -718,6 +720,21 @@ def main():
         l1_frac = epoch / max(1, args.epochs - 1)
         lambda_l1_now = args.lambda_l1 + (args.lambda_l1_end - args.lambda_l1) * l1_frac
 
+        # Aux loss warmup: FM and perceptual losses are zero during LR warmup, then
+        # ramp linearly from 0→full over the next 10 epochs.  This lets the generator
+        # first learn the basic L1/adversarial mapping before noisy auxiliary signals
+        # (from an untrained discriminator and mis-matched VGG features) are introduced.
+        aux_ramp_start = args.warmup_epochs
+        aux_ramp_end   = args.warmup_epochs + 5
+        if epoch < aux_ramp_start:
+            aux_scale = 0.0
+        elif epoch < aux_ramp_end:
+            aux_scale = float(epoch - aux_ramp_start) / float(aux_ramp_end - aux_ramp_start)
+        else:
+            aux_scale = 1.0
+        fm_lambda_now   = args.feature_matching_lambda * aux_scale
+        perc_lambda_now = args.perceptual_lambda * aux_scale
+
         gen_ls, disc_ls, l1_ls, adv_ls, fm_ls, perc_ls = [], [], [], [], [], []
         demo_done = False
 
@@ -741,9 +758,9 @@ def main():
                 tf.constant(lambda_l1_now, dtype=tf.float32),
                 args.label_smoothing,
                 args.label_noise,
-                args.feature_matching_lambda,
+                fm_lambda_now,
                 perc_model,
-                args.perceptual_lambda,
+                perc_lambda_now,
                 args.gan_mode,
                 update_disc,
                 args.gen_updates,
@@ -783,7 +800,9 @@ def main():
         )
 
         if epoch >= 4 and md < 0.10:
-            print(f"  [WARN] disc={md:.4f} very low - discriminator winning")
+            print(f"  [WARN] disc={md:.4f} very low - discriminator dominating (consider reducing disc_lr or adding disc_update_interval)")
+        if epoch >= 4 and md > 0.70:
+            print(f"  [WARN] disc={md:.4f} high - generator may be failing (check gen_updates or lambda_l1)")
 
         with sw.as_default():
             tf.summary.scalar('loss/gen', mg, step=epoch)

@@ -40,32 +40,32 @@ echo ""
   --mode full \
   --data_dir data/train \
   --test_dir data/test \
-  --results_dir outputs/test_results_v2 \
-  --savedir saved_models_v2 \
-  --logdir logs_v2 \
+  --results_dir outputs/test_results_v3 \
+  --savedir saved_models_v3 \
+  --logdir logs_v3 \
   --split_order map_sat \
   --epochs 200 \
   --batch_size 8 \
   --gen_lr 2e-4 \
   --disc_lr 1e-4 \
-  --lambda_l1 50 \
-  --lambda_l1_end 50 \
+  --lambda_l1 100 \
+  --lambda_l1_end 100 \
   --decay_epoch 100 \
   --warmup_epochs 5 \
-  --lambda_perc 5 \
-  --lambda_fm 10 \
+  --lambda_perc 2 \
+  --lambda_fm 5 \
   --gan_mode lsgan \
-  --label_smoothing 0.1 \
-  --label_noise 0.02 \
+  --label_smoothing 0.05 \
+  --label_noise 0.01 \
   --disc_update_interval 1 \
   --gen_updates 2 \
-  --disc_input_noise_std 0.05 \
+  --disc_input_noise_std 0.02 \
   --require_gpu \
   --generator_norm instance \
   --res_blocks 0 \
   --cache_dataset true \
   --save_every 10 \
-  --eval_every 10 \
+  --eval_every 5 \
   --sample_every 1 \
   --export
 
