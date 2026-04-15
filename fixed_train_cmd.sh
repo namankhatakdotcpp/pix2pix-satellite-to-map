@@ -7,15 +7,40 @@ set -euo pipefail
 #        3) Disabled multi_gpu (use single GPU cleanly until CUDA fixed)
 # -------------------------------------------------------------
 
-# -- CUDA fix: point TF to correct library paths ----------------
-# Try common locations on IIT Mandi servers
-for cuda_path in /usr/local/cuda /usr/local/cuda-11 /usr/local/cuda-12 /opt/cuda; do
-    if [ -d "$cuda_path/lib64" ]; then
-        export LD_LIBRARY_PATH="$cuda_path/lib64:${LD_LIBRARY_PATH:-}"
-        echo "[CUDA] Found at $cuda_path"
-        break
-    fi
+# -- CUDA fix: robust library-path discovery ---------------------
+append_libdir() {
+  local d="$1"
+  [[ -d "$d" ]] || return 0
+  case ":${LD_LIBRARY_PATH:-}:" in
+    *":$d:"*) ;;
+    *) LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+  esac
+}
+
+for d in \
+  /usr/local/cuda/lib64 \
+  /usr/local/cuda-*/lib64 \
+  /opt/cuda/lib64 \
+  /opt/cuda-*/lib64 \
+  /usr/lib/x86_64-linux-gnu \
+  /usr/lib/wsl/lib
+do
+  append_libdir "$d"
 done
+
+if command -v ldconfig >/dev/null 2>&1; then
+  while IFS= read -r libdir; do
+    append_libdir "$libdir"
+  done < <(
+    ldconfig -p 2>/dev/null \
+      | awk '/libcudart\.so|libcublas\.so|libcudnn\.so/ {print $NF}' \
+      | xargs -r -n1 dirname \
+      | sort -u
+  )
+fi
+
+export LD_LIBRARY_PATH
+echo "[CUDA] LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"
 
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 export TF_ENABLE_AUTO_MIXED_PRECISION=1
@@ -31,11 +56,28 @@ fi
 echo "===== IIT Mandi Training (FIXED) ====="
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || true
 echo ""
-"$PYTHON_BIN" -c "import tensorflow as tf; print('TF:', tf.__version__); print('GPUs:', tf.config.list_physical_devices('GPU'))"
+
+GPU_COUNT="$($PYTHON_BIN - <<'PY'
+import tensorflow as tf
+gpus = tf.config.list_physical_devices('GPU')
+print('TF:', tf.__version__)
+print('Built with CUDA:', tf.test.is_built_with_cuda())
+print('GPUs:', gpus)
+print(len(gpus))
+PY
+)"
+
+echo "$GPU_COUNT"
+GPU_COUNT="$(echo "$GPU_COUNT" | tail -n1)"
+
+if [[ "$GPU_COUNT" -eq 0 ]]; then
+  echo "[ERROR] TensorFlow still sees 0 GPUs after CUDA path setup."
+  echo "[ERROR] Check CUDA/cuDNN compatibility for your TensorFlow version on this server."
+  exit 1
+fi
+
 echo ""
 
-# NOTE: --multi_gpu is OFF until CUDA libraries are confirmed working.
-# If the python check above shows GPUs, add --multi_gpu back.
 "$PYTHON_BIN" src/train.py \
   --mode full \
   --data_dir data/train \
@@ -70,4 +112,4 @@ echo ""
   --export
 
 echo "===== Training Complete ====="
-echo "View TensorBoard: tensorboard --logdir logs_v2 --port 6006"
+echo "View TensorBoard: tensorboard --logdir logs_v3 --port 6006"
