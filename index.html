@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OrbitMap Studio | Satellite to Map Ops</title>
+    <meta
+      name="description"
+      content="Standalone operations dashboard for the pix2pix satellite-to-map project."
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              brand: '#4ade80',
+              brandSoft: '#22c55e',
+            },
+            fontFamily: {
+              sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            },
+            keyframes: {
+              fadeUp: {
+                '0%': { opacity: '0', transform: 'translateY(14px)' },
+                '100%': { opacity: '1', transform: 'translateY(0px)' },
+              },
+              floaty: {
+                '0%, 100%': { transform: 'translateY(0px)' },
+                '50%': { transform: 'translateY(-8px)' },
+              },
+            },
+            animation: {
+              fadeUp: 'fadeUp 700ms ease-out both',
+              floaty: 'floaty 7s ease-in-out infinite',
+            },
+          },
+        },
+      };
+    </script>
+
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      body {
+        font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+      }
+
+      .bg-grid {
+        background-image:
+          radial-gradient(circle at 15% 20%, rgba(74, 222, 128, 0.14), transparent 34%),
+          radial-gradient(circle at 84% 10%, rgba(255, 255, 255, 0.08), transparent 28%),
+          radial-gradient(circle at 70% 82%, rgba(34, 197, 94, 0.12), transparent 34%),
+          linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+          linear-gradient(180deg, #000000 0%, #040404 100%);
+        background-size: auto, auto, auto, 52px 52px, 52px 52px, auto;
+      }
+
+      .glass {
+        background: linear-gradient(165deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.03));
+        backdrop-filter: blur(12px);
+      }
+
+      .interactive {
+        transition: all 200ms ease;
+      }
+
+      .interactive:hover {
+        transform: translateY(-1px);
+      }
+    </style>
+  </head>
+  <body class="bg-grid min-h-screen overflow-x-hidden bg-black text-white antialiased">
+    <div class="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+      <div class="absolute -left-12 top-28 h-72 w-72 rounded-full bg-brand/20 blur-[110px]"></div>
+      <div class="absolute right-0 top-8 h-72 w-72 rounded-full bg-zinc-200/10 blur-[120px]"></div>
+      <div class="absolute bottom-0 left-1/2 h-64 w-64 -translate-x-1/2 rounded-full bg-brandSoft/20 blur-[110px]"></div>
+    </div>
+
+    <main>
+      <section id="overview" class="mx-auto max-w-7xl px-4 pb-14 pt-8 sm:px-6 lg:px-8 lg:pt-10">
+        <div class="grid items-center gap-10 lg:grid-cols-2">
+          <div class="animate-fadeUp space-y-7">
+            <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-zinc-900/70 px-3 py-1 text-xs text-zinc-300">
+              <span class="h-2 w-2 rounded-full bg-brand"></span>
+              Project Control Plane
+            </span>
+
+            <h1 class="text-4xl font-extrabold tracking-tight text-white sm:text-5xl lg:text-6xl">
+              Satellite to Map
+              <span class="block text-brand">Operations Console</span>
+            </h1>
+
+            <p class="max-w-xl text-base leading-relaxed text-zinc-300 sm:text-lg">
+              Monitor training progress, model health, and inference quality for your pix2pix
+              pipeline in a standalone frontend mapped to your existing API flow.
+            </p>
+
+            <div class="flex flex-wrap gap-3">
+              <button
+                id="refresh-btn"
+                type="button"
+                class="interactive inline-flex items-center rounded-xl border border-white/10 bg-brand px-4 py-2.5 text-sm font-semibold text-black hover:bg-brandSoft"
+              >
+                Refresh Telemetry
+              </button>
+              <a
+                href="#converter"
+                class="interactive inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-zinc-100 hover:bg-white/10"
+              >
+                Upload & Convert
+              </a>
+              <a
+                href="#dashboard"
+                class="interactive inline-flex items-center rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-zinc-100 hover:bg-white/10"
+              >
+                Open Dashboard
+              </a>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <article class="glass rounded-xl border border-white/10 p-4">
+                <p class="text-xs text-zinc-400">Service</p>
+                <p id="hero-status" class="mt-1 text-lg font-bold tracking-tight text-brand">checking</p>
+              </article>
+              <article class="glass rounded-xl border border-white/10 p-4">
+                <p class="text-xs text-zinc-400">GPU Nodes</p>
+                <p id="hero-gpu" class="mt-1 text-lg font-bold tracking-tight text-white">0</p>
+              </article>
+              <article class="glass rounded-xl border border-white/10 p-4">
+                <p class="text-xs text-zinc-400">Avg Latency</p>
+                <p id="hero-latency" class="mt-1 text-lg font-bold tracking-tight text-white">0ms</p>
+              </article>
+              <article class="glass rounded-xl border border-white/10 p-4">
+                <p class="text-xs text-zinc-400">Recent SSIM</p>
+                <p id="hero-ssim" class="mt-1 text-lg font-bold tracking-tight text-white">0.000</p>
+              </article>
+            </div>
+
+            <div class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-zinc-800/60 px-3 py-1.5 text-xs text-zinc-500 backdrop-blur-sm">
+              <div class="h-4 w-4 rounded-sm bg-zinc-400/70"></div>
+              <span>pix2pix-satellite-to-map</span>
+            </div>
+          </div>
+
+          <div id="preview-card" class="animate-fadeUp glass rounded-2xl border border-white/10 p-4 [animation-delay:180ms]">
+            <div class="overflow-hidden rounded-xl border border-white/10 bg-black/80">
+              <div class="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                <div class="flex items-center gap-2 text-sm font-semibold text-white">
+                  <span class="h-2 w-2 rounded-full bg-brand animate-floaty"></span>
+                  Training Preview
+                </div>
+                <span class="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-zinc-300">outputs/demo.gif</span>
+              </div>
+              <img
+                src="outputs/demo.gif"
+                alt="Training progress demo"
+                class="h-72 w-full object-cover object-center sm:h-80"
+                loading="lazy"
+              />
+              <div class="grid grid-cols-3 gap-2 border-t border-white/10 p-3">
+                <img src="outputs/test_results/epoch_001.png" alt="Epoch 1" class="h-20 w-full rounded-lg border border-white/10 object-cover" loading="lazy" />
+                <img src="outputs/test_results/epoch_005.png" alt="Epoch 5" class="h-20 w-full rounded-lg border border-white/10 object-cover" loading="lazy" />
+                <img src="outputs/test_results/epoch_010.png" alt="Epoch 10" class="h-20 w-full rounded-lg border border-white/10 object-cover" loading="lazy" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="converter" class="mx-auto max-w-7xl px-4 pb-14 sm:px-6 lg:px-8">
+        <div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 class="text-2xl font-bold tracking-tight text-white sm:text-3xl">Satellite Image Converter</h2>
+            <p class="mt-1 text-sm text-zinc-400">
+              Upload a satellite image and convert it into a map-style output using your inference API.
+            </p>
+          </div>
+          <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-zinc-300">
+            Endpoint: /predict or /predict/compare
+          </span>
+        </div>
+
+        <div class="grid gap-4 lg:grid-cols-12">
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-4">
+            <h3 class="text-sm font-semibold tracking-tight text-white">Upload Controls</h3>
+            <div class="mt-4 space-y-4">
+              <label class="block">
+                <span class="mb-2 block text-xs font-medium text-zinc-400">Satellite image file</span>
+                <input
+                  id="satellite-upload"
+                  type="file"
+                  accept="image/png,image/jpeg,image/jpg"
+                  class="block w-full cursor-pointer rounded-lg border border-white/10 bg-black/70 px-3 py-2 text-sm text-zinc-200 file:mr-3 file:rounded-md file:border-0 file:bg-brand file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-black hover:file:bg-brandSoft"
+                />
+              </label>
+
+              <label class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
+                <span class="text-zinc-300">Compare mode output</span>
+                <input id="upload-compare" type="checkbox" class="h-4 w-4 accent-green-400" />
+              </label>
+
+              <button
+                id="convert-upload-btn"
+                type="button"
+                class="interactive inline-flex w-full items-center justify-center rounded-lg border border-white/10 bg-brand px-4 py-2.5 text-sm font-semibold text-black hover:bg-brandSoft"
+              >
+                Convert to Map
+              </button>
+
+              <p id="convert-status" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-400">
+                Select an image to begin conversion.
+              </p>
+
+              <a
+                id="download-result"
+                href="#"
+                download="generated_map.png"
+                class="hidden interactive inline-flex w-full items-center justify-center rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-zinc-100 hover:bg-white/10"
+              >
+                Download Result
+              </a>
+            </div>
+          </article>
+
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-8">
+            <h3 class="mb-4 text-sm font-semibold tracking-tight text-white">Conversion Preview</h3>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="overflow-hidden rounded-xl border border-white/10 bg-black/75">
+                <div class="border-b border-white/10 px-3 py-2 text-xs text-zinc-400">Input Satellite</div>
+                <div class="relative grid h-64 place-items-center bg-black/40">
+                  <p id="input-placeholder" class="px-4 text-center text-xs text-zinc-500">
+                    Uploaded image preview appears here.
+                  </p>
+                  <img id="input-preview" alt="Input preview" class="hidden h-full w-full object-cover" />
+                </div>
+              </div>
+
+              <div class="overflow-hidden rounded-xl border border-white/10 bg-black/75">
+                <div class="border-b border-white/10 px-3 py-2 text-xs text-zinc-400">Generated Map</div>
+                <div class="relative grid h-64 place-items-center bg-black/40">
+                  <p id="output-placeholder" class="px-4 text-center text-xs text-zinc-500">
+                    Converted output appears here after processing.
+                  </p>
+                  <img id="output-preview" alt="Output preview" class="hidden h-full w-full object-cover" />
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="dashboard" class="mx-auto max-w-7xl px-4 pb-14 sm:px-6 lg:px-8">
+        <div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 class="text-2xl font-bold tracking-tight text-white sm:text-3xl">Model Ops Dashboard</h2>
+            <p class="mt-1 text-sm text-zinc-400">
+              Restored project logic with refreshed dark design and color system.
+            </p>
+          </div>
+          <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-zinc-300">
+            API: /health, /model/info, /predict, /predict/compare
+          </span>
+        </div>
+
+        <div class="grid gap-4 lg:grid-cols-12">
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-4">
+            <h3 class="text-sm font-semibold tracking-tight text-white">Inference Workbench</h3>
+            <div class="mt-4 space-y-4">
+              <label class="block">
+                <span class="mb-2 block text-xs font-medium text-zinc-400">Input mode</span>
+                <select
+                  id="input-mode"
+                  class="w-full rounded-lg border border-white/10 bg-black/70 px-3 py-2 text-sm text-white outline-none ring-brand/40 transition focus:ring"
+                >
+                  <option value="single">Single image</option>
+                  <option value="batch">Batch directory</option>
+                </select>
+              </label>
+
+              <button
+                id="compare-toggle"
+                type="button"
+                aria-pressed="false"
+                class="interactive flex w-full items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm"
+              >
+                <span class="text-zinc-300">Compare mode disabled</span>
+                <span class="rounded-full bg-zinc-700 px-2 py-0.5 text-xs text-zinc-200">OFF</span>
+              </button>
+
+              <button
+                id="run-inference"
+                type="button"
+                class="interactive inline-flex w-full items-center justify-center rounded-lg border border-white/10 bg-brand px-4 py-2.5 text-sm font-semibold text-black hover:bg-brandSoft"
+              >
+                Run Mock Inference
+              </button>
+            </div>
+          </article>
+
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-4">
+            <h3 class="text-sm font-semibold tracking-tight text-white">Service Health</h3>
+            <dl class="mt-4 space-y-3 text-sm">
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">Status</dt>
+                <dd id="health-status" class="font-semibold text-white">-</dd>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">GPU Available</dt>
+                <dd id="health-gpu-available" class="font-semibold text-white">-</dd>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">GPU Count</dt>
+                <dd id="health-gpu-count" class="font-semibold text-white">-</dd>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">Model Path</dt>
+                <dd id="health-model" class="max-w-[56%] truncate text-right font-semibold text-white">-</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-4">
+            <h3 class="text-sm font-semibold tracking-tight text-white">Model Registry</h3>
+            <dl class="mt-4 space-y-3 text-sm">
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">Framework</dt>
+                <dd id="model-framework" class="font-semibold text-white">-</dd>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">Input Shape</dt>
+                <dd id="model-input" class="font-semibold text-white">-</dd>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">Output Shape</dt>
+                <dd id="model-output" class="font-semibold text-white">-</dd>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <dt class="text-zinc-400">Parameters</dt>
+                <dd id="model-params" class="font-semibold text-white">-</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-8">
+            <div class="mb-4 flex items-center justify-between">
+              <h3 class="text-sm font-semibold tracking-tight text-white">Quality Metrics Timeline</h3>
+              <span class="text-xs text-zinc-400">MAE, SSIM, PSNR</span>
+            </div>
+            <div id="metrics-bars" class="grid grid-cols-5 gap-2 sm:grid-cols-10"></div>
+            <div class="mt-4 grid grid-cols-1 gap-2 text-xs text-zinc-400 sm:grid-cols-3">
+              <p class="rounded-lg border border-white/10 bg-white/5 px-3 py-2">MAE: lower is better</p>
+              <p class="rounded-lg border border-white/10 bg-white/5 px-3 py-2">SSIM: closer to 1.0</p>
+              <p class="rounded-lg border border-white/10 bg-white/5 px-3 py-2">PSNR: higher is better</p>
+            </div>
+          </article>
+
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-4">
+            <h3 class="mb-4 text-sm font-semibold tracking-tight text-white">Latest Run</h3>
+            <div class="space-y-2 text-sm">
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <span class="text-zinc-400">Mode</span>
+                <span id="run-mode" class="font-semibold text-white">single</span>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <span class="text-zinc-400">Latency</span>
+                <span id="run-latency" class="font-semibold text-white">-</span>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <span class="text-zinc-400">MAE</span>
+                <span id="run-mae" class="font-semibold text-white">-</span>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <span class="text-zinc-400">SSIM</span>
+                <span id="run-ssim" class="font-semibold text-white">-</span>
+              </div>
+              <div class="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                <span class="text-zinc-400">PSNR</span>
+                <span id="run-psnr" class="font-semibold text-white">-</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="glass rounded-2xl border border-white/10 p-5 lg:col-span-12">
+            <h3 class="mb-4 text-sm font-semibold tracking-tight text-white">Pipeline Snapshot</h3>
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div class="interactive rounded-xl border border-white/10 bg-white/5 p-4">
+                <p class="text-xs text-zinc-400">1. Data Ingest</p>
+                <p class="mt-1 text-sm font-semibold text-white">Paired [map | satellite] dataset</p>
+                <p class="mt-2 text-xs text-zinc-500">Split, normalize to [-1, 1], random jitter and crop.</p>
+              </div>
+              <div class="interactive rounded-xl border border-white/10 bg-white/5 p-4">
+                <p class="text-xs text-zinc-400">2. Generator</p>
+                <p class="mt-1 text-sm font-semibold text-white">U-Net architecture</p>
+                <p class="mt-2 text-xs text-zinc-500">Encoder-decoder with skip connections for structure retention.</p>
+              </div>
+              <div class="interactive rounded-xl border border-white/10 bg-white/5 p-4">
+                <p class="text-xs text-zinc-400">3. Discriminator</p>
+                <p class="mt-1 text-sm font-semibold text-white">PatchGAN critic</p>
+                <p class="mt-2 text-xs text-zinc-500">Patch-level realism optimization for map texture quality.</p>
+              </div>
+              <div class="interactive rounded-xl border border-white/10 bg-white/5 p-4">
+                <p class="text-xs text-zinc-400">4. API Inference</p>
+                <p class="mt-1 text-sm font-semibold text-white">FastAPI /predict endpoints</p>
+                <p class="mt-2 text-xs text-zinc-500">Health checks, model info and compare mode outputs.</p>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="border-t border-white/10 bg-black/50">
+      <div class="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-zinc-500 sm:px-6 lg:px-8">
+        <p>OrbitMap Studio • Standalone frontend for pix2pix-satellite-to-map</p>
+        <p>Tailwind Play CDN + Inter + Vanilla JS</p>
+      </div>
+    </footer>
+
+    <script>
+      const mockApi = {
+        '/health': {
+          status: 'ok',
+          model: 'saved_models/best_generator',
+          gpu_available: true,
+          gpus: 1,
+        },
+        '/model/info': {
+          model_dir: 'saved_models/best_generator',
+          input_shape: [256, 256, 3],
+          output_shape: [256, 256, 3],
+          parameters: 54341891,
+          framework: 'TensorFlow 2.x',
+        },
+        '/telemetry': {
+          avgLatencyMs: 86,
+          metrics: [
+            { epoch: 1, mae: 0.164, ssim: 0.701, psnr: 16.2 },
+            { epoch: 2, mae: 0.152, ssim: 0.733, psnr: 17.1 },
+            { epoch: 3, mae: 0.143, ssim: 0.751, psnr: 17.8 },
+            { epoch: 4, mae: 0.138, ssim: 0.767, psnr: 18.4 },
+            { epoch: 5, mae: 0.131, ssim: 0.781, psnr: 18.9 },
+            { epoch: 6, mae: 0.127, ssim: 0.794, psnr: 19.3 },
+            { epoch: 7, mae: 0.122, ssim: 0.807, psnr: 19.8 },
+            { epoch: 8, mae: 0.118, ssim: 0.819, psnr: 20.2 },
+            { epoch: 9, mae: 0.115, ssim: 0.826, psnr: 20.5 },
+            { epoch: 10, mae: 0.111, ssim: 0.834, psnr: 20.9 },
+          ],
+        },
+      };
+
+      const state = {
+        compare: false,
+        inputMode: 'single',
+        telemetry: null,
+        uploadFile: null,
+        inputPreviewUrl: null,
+        outputPreviewUrl: null,
+      };
+
+      const q = (selector) => document.querySelector(selector);
+
+      const formatNumber = (value, digits = 3) => Number(value).toFixed(digits);
+
+      async function apiFetch(path) {
+        const base = 'http://localhost:8080';
+        try {
+          const response = await fetch(`${base}${path}`);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return await response.json();
+        } catch (_error) {
+          await new Promise((resolve) => setTimeout(resolve, 260));
+          return structuredClone(mockApi[path]);
+        }
+      }
+
+      function updateHero(health, telemetry) {
+        q('#hero-status').textContent = health.status;
+        q('#hero-status').className = `mt-1 text-lg font-bold tracking-tight ${health.status === 'ok' ? 'text-brand' : 'text-amber-300'}`;
+        q('#hero-gpu').textContent = String(health.gpus);
+        q('#hero-latency').textContent = `${telemetry.avgLatencyMs}ms`;
+        q('#hero-ssim').textContent = formatNumber(telemetry.metrics[telemetry.metrics.length - 1].ssim, 3);
+      }
+
+      function updateHealthCard(health) {
+        q('#health-status').textContent = health.status;
+        q('#health-gpu-available').textContent = health.gpu_available ? 'yes' : 'no';
+        q('#health-gpu-count').textContent = String(health.gpus);
+        q('#health-model').textContent = health.model;
+      }
+
+      function updateModelCard(modelInfo) {
+        q('#model-framework').textContent = modelInfo.framework;
+        q('#model-input').textContent = `[${modelInfo.input_shape.join(', ')}]`;
+        q('#model-output').textContent = `[${modelInfo.output_shape.join(', ')}]`;
+        q('#model-params').textContent = String(modelInfo.parameters).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      }
+
+      function renderMetrics(metrics) {
+        const container = q('#metrics-bars');
+        container.innerHTML = '';
+
+        metrics.forEach((metric) => {
+          const card = document.createElement('div');
+          card.className = 'rounded-lg border border-white/10 bg-white/5 p-2';
+
+          const psnrHeight = Math.min(95, Math.max(20, metric.psnr * 4));
+          const ssimHeight = Math.round(metric.ssim * 100);
+          const maeHeight = Math.round((1 - metric.mae) * 100);
+
+          card.innerHTML = `
+            <p class="text-[10px] text-zinc-500">E${metric.epoch}</p>
+            <div class="mt-2 flex h-24 items-end gap-1">
+              <div class="w-1/3 rounded-sm bg-brand/90" style="height:${ssimHeight}%" title="SSIM ${metric.ssim}"></div>
+              <div class="w-1/3 rounded-sm bg-zinc-300/80" style="height:${psnrHeight}%" title="PSNR ${metric.psnr}"></div>
+              <div class="w-1/3 rounded-sm bg-emerald-700/90" style="height:${maeHeight}%" title="MAE ${metric.mae}"></div>
+            </div>
+          `;
+          container.appendChild(card);
+        });
+      }
+
+      function applyLatestRun(runData) {
+        q('#run-mode').textContent = runData.mode;
+        q('#run-latency').textContent = `${runData.latencyMs}ms`;
+        q('#run-mae').textContent = formatNumber(runData.mae, 3);
+        q('#run-ssim').textContent = formatNumber(runData.ssim, 3);
+        q('#run-psnr').textContent = formatNumber(runData.psnr, 2);
+      }
+
+      function randomRun(mode) {
+        const mae = Number((0.1 + Math.random() * 0.06).toFixed(3));
+        const ssim = Number((0.79 + Math.random() * 0.09).toFixed(3));
+        const psnr = Number((19.2 + Math.random() * 2.6).toFixed(2));
+        const latencyBase = mode === 'batch' ? 210 : 84;
+        const latencyMs = Math.floor(latencyBase + Math.random() * 60);
+        return { mode, mae, ssim, psnr, latencyMs };
+      }
+
+      function setConvertStatus(message, tone = 'neutral') {
+        const status = q('#convert-status');
+        status.textContent = message;
+        if (tone === 'success') {
+          status.className = 'rounded-lg border border-green-400/30 bg-green-500/10 px-3 py-2 text-xs text-green-300';
+          return;
+        }
+        if (tone === 'error') {
+          status.className = 'rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200';
+          return;
+        }
+        status.className = 'rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-400';
+      }
+
+      async function buildFallbackMapDataUrl(file) {
+        const img = await createImageBitmap(file);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = imageData.data;
+
+        for (let i = 0; i < pixels.length; i += 4) {
+          const r = pixels[i];
+          const g = pixels[i + 1];
+          const b = pixels[i + 2];
+          const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+          pixels[i] = Math.min(255, gray * 0.62 + 20);
+          pixels[i + 1] = Math.min(255, gray * 0.95 + 28);
+          pixels[i + 2] = Math.min(255, gray * 0.58 + 18);
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = '#4ade80';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        return canvas.toDataURL('image/png');
+      }
+
+      function setOutputImage(src) {
+        const outputImage = q('#output-preview');
+        const outputPlaceholder = q('#output-placeholder');
+        const downloadLink = q('#download-result');
+
+        outputImage.src = src;
+        outputImage.classList.remove('hidden');
+        outputPlaceholder.classList.add('hidden');
+
+        downloadLink.href = src;
+        downloadLink.classList.remove('hidden');
+      }
+
+      function setupUploadConverter() {
+        const uploadInput = q('#satellite-upload');
+        const compareCheckbox = q('#upload-compare');
+        const convertButton = q('#convert-upload-btn');
+        const inputImage = q('#input-preview');
+        const inputPlaceholder = q('#input-placeholder');
+
+        uploadInput.addEventListener('change', () => {
+          const [file] = uploadInput.files || [];
+          state.uploadFile = file || null;
+
+          if (!file) {
+            inputImage.classList.add('hidden');
+            inputPlaceholder.classList.remove('hidden');
+            setConvertStatus('Select an image to begin conversion.');
+            return;
+          }
+
+          if (state.inputPreviewUrl) {
+            URL.revokeObjectURL(state.inputPreviewUrl);
+          }
+
+          state.inputPreviewUrl = URL.createObjectURL(file);
+          inputImage.src = state.inputPreviewUrl;
+          inputImage.classList.remove('hidden');
+          inputPlaceholder.classList.add('hidden');
+          setConvertStatus('Image ready. Click Convert to Map.');
+        });
+
+        convertButton.addEventListener('click', async () => {
+          if (!state.uploadFile) {
+            setConvertStatus('Please upload a satellite image first.', 'error');
+            return;
+          }
+
+          convertButton.disabled = true;
+          convertButton.classList.add('opacity-70', 'cursor-not-allowed');
+          convertButton.textContent = 'Converting...';
+          setConvertStatus('Running inference...');
+
+          const endpoint = compareCheckbox.checked ? '/predict/compare' : '/predict';
+          const formData = new FormData();
+          formData.append('file', state.uploadFile);
+
+          try {
+            const response = await fetch(`http://localhost:8080${endpoint}`, {
+              method: 'POST',
+              body: formData,
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+
+            const blob = await response.blob();
+            if (state.outputPreviewUrl) {
+              URL.revokeObjectURL(state.outputPreviewUrl);
+            }
+            state.outputPreviewUrl = URL.createObjectURL(blob);
+            setOutputImage(state.outputPreviewUrl);
+            setConvertStatus('Conversion complete. Result generated from backend API.', 'success');
+          } catch (_error) {
+            const fallbackDataUrl = await buildFallbackMapDataUrl(state.uploadFile);
+            setOutputImage(fallbackDataUrl);
+            setConvertStatus('API unavailable. Showing local fallback preview. Start FastAPI for real model output.', 'error');
+          }
+
+          convertButton.disabled = false;
+          convertButton.classList.remove('opacity-70', 'cursor-not-allowed');
+          convertButton.textContent = 'Convert to Map';
+        });
+      }
+
+      async function hydrateDashboard() {
+        const [health, modelInfo, telemetry] = await Promise.all([
+          apiFetch('/health'),
+          apiFetch('/model/info'),
+          apiFetch('/telemetry'),
+        ]);
+
+        state.telemetry = telemetry;
+
+        updateHero(health, telemetry);
+        updateHealthCard(health);
+        updateModelCard(modelInfo);
+        renderMetrics(telemetry.metrics);
+
+        const latest = telemetry.metrics[telemetry.metrics.length - 1];
+        applyLatestRun({
+          mode: state.inputMode,
+          latencyMs: telemetry.avgLatencyMs,
+          mae: latest.mae,
+          ssim: latest.ssim,
+          psnr: latest.psnr,
+        });
+      }
+
+      function setupInteractions() {
+        const compareToggle = q('#compare-toggle');
+        const inputMode = q('#input-mode');
+        const runButton = q('#run-inference');
+        const previewCard = q('#preview-card');
+
+        compareToggle.addEventListener('click', () => {
+          state.compare = !state.compare;
+          compareToggle.setAttribute('aria-pressed', String(state.compare));
+          compareToggle.querySelector('span').textContent = state.compare
+            ? 'Compare mode enabled'
+            : 'Compare mode disabled';
+          compareToggle.lastElementChild.textContent = state.compare ? 'ON' : 'OFF';
+          compareToggle.lastElementChild.className = `rounded-full px-2 py-0.5 text-xs ${state.compare ? 'bg-brand/25 text-brand' : 'bg-zinc-700 text-zinc-200'}`;
+        });
+
+        inputMode.addEventListener('change', (event) => {
+          state.inputMode = event.target.value;
+          q('#run-mode').textContent = state.inputMode;
+        });
+
+        runButton.addEventListener('click', async () => {
+          runButton.disabled = true;
+          runButton.classList.add('opacity-70', 'cursor-not-allowed');
+          runButton.textContent = 'Processing...';
+
+          await new Promise((resolve) => setTimeout(resolve, 520));
+          const run = randomRun(state.inputMode);
+          applyLatestRun(run);
+
+          if (state.telemetry) {
+            state.telemetry.avgLatencyMs = Math.round((state.telemetry.avgLatencyMs * 3 + run.latencyMs) / 4);
+            state.telemetry.metrics = [
+              ...state.telemetry.metrics.slice(1),
+              {
+                epoch: state.telemetry.metrics[state.telemetry.metrics.length - 1].epoch + 1,
+                mae: run.mae,
+                ssim: run.ssim,
+                psnr: run.psnr,
+              },
+            ];
+            renderMetrics(state.telemetry.metrics);
+          }
+
+          q('#hero-latency').textContent = `${run.latencyMs}ms`;
+          q('#hero-ssim').textContent = formatNumber(run.ssim, 3);
+
+          runButton.disabled = false;
+          runButton.classList.remove('opacity-70', 'cursor-not-allowed');
+          runButton.textContent = 'Run Mock Inference';
+        });
+
+        q('#refresh-btn').addEventListener('click', hydrateDashboard);
+
+        window.addEventListener('mousemove', (event) => {
+          const x = (event.clientX / window.innerWidth - 0.5) * 8;
+          const y = (event.clientY / window.innerHeight - 0.5) * 8;
+          previewCard.style.transform = `translate(${x * -0.2}px, ${y * -0.2}px)`;
+        });
+      }
+
+      async function init() {
+        setupInteractions();
+        setupUploadConverter();
+        await hydrateDashboard();
+      }
+
+      init();
+    </script>
+  </body>
+</html>
