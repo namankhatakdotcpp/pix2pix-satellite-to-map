@@ -18,7 +18,6 @@ import numpy as np
 import tensorflow as tf
 import imageio
 from pathlib import Path
-from collections import deque
 from tqdm import tqdm
 
 try:
@@ -324,7 +323,8 @@ def discriminator_loss(disc_real_patch, disc_fake_patch,
     fake_p = tf.cast(disc_fake_patch, tf.float32)
 
     if gan_mode == 'lsgan':
-        real_loss = tf.reduce_mean(tf.square(real_p - 1.0))
+        real_target = 1.0 - label_smoothing
+        real_loss = tf.reduce_mean(tf.square(real_p - real_target))
         fake_loss = tf.reduce_mean(tf.square(fake_p))
         return 0.5 * (real_loss + fake_loss)
 
@@ -431,6 +431,7 @@ def train_step(satellite, real_map, generator, discriminator,
             gen_total = gen_total + perc_lambda * perc
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
+        gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
         gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
 
     # Train discriminator once, reusing the last generated image (consistent with gen step).
@@ -451,6 +452,7 @@ def train_step(satellite, real_map, generator, discriminator,
         )
 
     disc_grads = dt.gradient(disc_total, discriminator.trainable_variables)
+    disc_grads, _ = tf.clip_by_global_norm(disc_grads, 1.0)
     if update_disc:
         disc_opt.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
 
@@ -543,14 +545,14 @@ def main():
     ap.add_argument('--logdir', default='logs')
 
     # Hyperparams
-    ap.add_argument('--epochs', type=int, default=200)
-    ap.add_argument('--batch_size', type=int, default=1)
+    ap.add_argument('--epochs', type=int, default=300)
+    ap.add_argument('--batch_size', type=int, default=2)
     ap.add_argument('--lr', type=float, default=None,
                     help='Legacy single LR. If set, overrides both gen_lr and disc_lr.')
     ap.add_argument('--gen_lr', type=float, default=2e-4)
-    ap.add_argument('--disc_lr', type=float, default=5e-5)
+    ap.add_argument('--disc_lr', type=float, default=1e-4)
     ap.add_argument('--lambda_l1', type=float, default=100.0)
-    ap.add_argument('--lambda_l1_end', type=float, default=100.0)
+    ap.add_argument('--lambda_l1_end', type=float, default=50.0)
     ap.add_argument('--decay_epoch', type=int, default=100)
     ap.add_argument('--warmup_epochs', type=int, default=5)
     ap.add_argument('--save_every', type=int, default=10)
@@ -566,8 +568,8 @@ def main():
     ap.add_argument('--disc_update_interval', type=int, default=1)
     ap.add_argument('--gen_updates', type=int, default=2,
                     help='Number of generator updates per discriminator update')
-    ap.add_argument('--disc_input_noise_std', type=float, default=0.05,
-                    help='Gaussian noise stddev added to discriminator real/fake inputs')
+    ap.add_argument('--disc_input_noise_std', type=float, default=0.1,
+                    help='Gaussian noise stddev added to discriminator real/fake inputs (annealed to 0 over first 50%% of training)')
 
     # Architecture
     ap.add_argument('--generator_norm', default='instance', choices=['instance', 'batch'])
@@ -662,7 +664,7 @@ def main():
 
                 base = VGG19(include_top=False, weights='imagenet', input_shape=(224, 224, 3))
                 base.trainable = False
-                outs = [base.get_layer(n).output for n in ('block3_conv3', 'block4_conv3')]
+                outs = [base.get_layer(n).output for n in ('block1_conv2', 'block2_conv2', 'block3_conv3', 'block4_conv3')]
                 perc_model = tf.keras.Model(base.input, outs)
                 perc_model.trainable = False
                 print("[LOSS] VGG19 perceptual loss enabled")
@@ -679,11 +681,13 @@ def main():
             beta_1=0.5
         )
 
+        epoch_var = tf.Variable(0, trainable=False, dtype=tf.int64)
         ckpt = tf.train.Checkpoint(
             generator=generator,
             discriminator=discriminator,
             gen_opt=gen_opt,
             disc_opt=disc_opt,
+            epoch=epoch_var,
         )
 
     mgr = tf.train.CheckpointManager(ckpt, args.savedir, max_to_keep=5)
@@ -691,16 +695,12 @@ def main():
     start_epoch = 0
     if args.restore and mgr.latest_checkpoint:
         ckpt.restore(mgr.latest_checkpoint)
-        try:
-            start_epoch = int(mgr.latest_checkpoint.split('-')[-1]) * args.save_every
-        except Exception:
-            pass
-        print(f"[CKPT] Restored from {mgr.latest_checkpoint} (epoch ~{start_epoch})")
+        start_epoch = int(epoch_var.numpy())
+        print(f"[CKPT] Restored from {mgr.latest_checkpoint} -> resuming from epoch {start_epoch + 1}")
 
     sw = tf.summary.create_file_writer(args.logdir)
 
     best_ssim = 0.0
-    loss_window = deque(maxlen=6)
 
     print(f"\n{'=' * 60}")
     print(f"  Pix2Pix | {args.epochs} epochs | L1={args.lambda_l1}")
@@ -746,6 +746,10 @@ def main():
         fm_lambda_now   = args.feature_matching_lambda * aux_scale
         perc_lambda_now = args.perceptual_lambda * aux_scale
 
+        # Anneal discriminator input noise from full → 0 over first 50% of training.
+        noise_anneal_frac = min(1.0, epoch / max(1, args.epochs * 0.5))
+        disc_noise_now = args.disc_input_noise_std * (1.0 - noise_anneal_frac)
+
         gen_ls, disc_ls, l1_ls, adv_ls, fm_ls, perc_ls = [], [], [], [], [], []
         demo_done = False
 
@@ -777,7 +781,7 @@ def main():
                     args.gan_mode,
                     update_disc,
                     args.gen_updates,
-                    args.disc_input_noise_std,
+                    disc_noise_now,
                 ),
             )
             gt   = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[0], axis=None)
@@ -856,16 +860,10 @@ def main():
                     generator.save(bp)
                     print(f"  [BEST] SSIM={best_ssim:.4f} -> {bp}")
 
-        loss_window.append(mg)
-        if len(loss_window) == loss_window.maxlen and epoch >= 15:
-            if (max(loss_window) - min(loss_window)) < 0.02:
-                new_gen_lr = max(gen_lr_now * 0.5, 1e-7)
-                new_disc_lr = max(disc_lr_now * 0.5, 1e-7)
-                gen_opt.learning_rate.assign(new_gen_lr)
-                disc_opt.learning_rate.assign(new_disc_lr)
-                print(f"  [ADAPT] Loss stagnant - gen_lr -> {new_gen_lr:.2e}, disc_lr -> {new_disc_lr:.2e}")
+
 
         if (epoch + 1) % args.save_every == 0:
+            epoch_var.assign(epoch + 1)
             print(f"  [CKPT] {mgr.save()}")
 
     print(f"\n[DONE] Best SSIM: {best_ssim:.4f}")
