@@ -755,24 +755,33 @@ def main():
             sat_b, map_b = batch
             update_disc = ((step % max(1, args.disc_update_interval)) == 0)
 
-            gt, ga, gl1, dt, fm, perc = train_step(
-                sat_b,
-                map_b,
-                generator,
-                discriminator,
-                gen_opt,
-                disc_opt,
-                tf.constant(lambda_l1_now, dtype=tf.float32),
-                args.label_smoothing,
-                args.label_noise,
-                fm_lambda_now,
-                perc_model,
-                perc_lambda_now,
-                args.gan_mode,
-                update_disc,
-                args.gen_updates,
-                args.disc_input_noise_std,
+            per_replica = strategy.run(
+                train_step,
+                args=(
+                    sat_b,
+                    map_b,
+                    generator,
+                    discriminator,
+                    gen_opt,
+                    disc_opt,
+                    tf.constant(lambda_l1_now, dtype=tf.float32),
+                    args.label_smoothing,
+                    args.label_noise,
+                    fm_lambda_now,
+                    perc_model,
+                    perc_lambda_now,
+                    args.gan_mode,
+                    update_disc,
+                    args.gen_updates,
+                    args.disc_input_noise_std,
+                ),
             )
+            gt   = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[0], axis=None)
+            ga   = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[1], axis=None)
+            gl1  = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[2], axis=None)
+            dt   = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[3], axis=None)
+            fm   = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[4], axis=None)
+            perc = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica[5], axis=None)
 
             gen_ls.append(float(gt))
             disc_ls.append(float(dt))
