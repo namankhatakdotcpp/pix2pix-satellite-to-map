@@ -87,7 +87,7 @@ echo ""
   --logdir logs_v3 \
   --split_order map_sat \
   --epochs 200 \
-  --batch_size 8 \
+  --batch_size 1 \
   --gen_lr 2e-4 \
   --disc_lr 1e-4 \
   --lambda_l1 100 \
