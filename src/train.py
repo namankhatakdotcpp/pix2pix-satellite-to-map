@@ -582,7 +582,11 @@ def main():
     # Mode
     ap.add_argument('--mode', default='full', choices=['full', 'demo'])
     ap.add_argument('--demo_steps', type=int, default=5)
-    ap.add_argument('--restore', action='store_true')
+    ap.add_argument(
+        '--restore',
+        action='store_true',
+        help='Restore latest checkpoint'
+    )
     ap.add_argument('--export', action='store_true')
     ap.add_argument('--multi_gpu', action='store_true')
     ap.add_argument('--require_gpu', action='store_true')
