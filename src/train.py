@@ -666,15 +666,22 @@ def main():
                 print(f"[WARN] VGG19 unavailable ({e}), perceptual_lambda=0")
                 args.perceptual_lambda = 0.0
 
-        gen_opt = tf.keras.optimizers.Adam(args.gen_lr, beta_1=0.5)
-        disc_opt = tf.keras.optimizers.Adam(args.disc_lr, beta_1=0.5)
+        gen_opt = tf.keras.optimizers.Adam(
+            learning_rate=args.gen_lr,
+            beta_1=0.5
+        )
+        disc_opt = tf.keras.optimizers.Adam(
+            learning_rate=args.disc_lr,
+            beta_1=0.5
+        )
 
-    ckpt = tf.train.Checkpoint(
-        generator=generator,
-        discriminator=discriminator,
-        gen_opt=gen_opt,
-        disc_opt=disc_opt,
-    )
+        ckpt = tf.train.Checkpoint(
+            generator=generator,
+            discriminator=discriminator,
+            gen_opt=gen_opt,
+            disc_opt=disc_opt,
+        )
+
     mgr = tf.train.CheckpointManager(ckpt, args.savedir, max_to_keep=5)
 
     start_epoch = 0
