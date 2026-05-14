@@ -548,7 +548,7 @@ def main():
     ap.add_argument('--lr', type=float, default=None,
                     help='Legacy single LR. If set, overrides both gen_lr and disc_lr.')
     ap.add_argument('--gen_lr', type=float, default=2e-4)
-    ap.add_argument('--disc_lr', type=float, default=1e-4)
+    ap.add_argument('--disc_lr', type=float, default=5e-5)
     ap.add_argument('--lambda_l1', type=float, default=100.0)
     ap.add_argument('--lambda_l1_end', type=float, default=100.0)
     ap.add_argument('--decay_epoch', type=int, default=100)
@@ -561,7 +561,7 @@ def main():
     ap.add_argument('--perceptual_lambda', '--lambda_perc', dest='perceptual_lambda', type=float, default=2.0)
     ap.add_argument('--feature_matching_lambda', '--lambda_fm', dest='feature_matching_lambda', type=float, default=5.0)
     ap.add_argument('--gan_mode', default='lsgan', choices=['lsgan', 'bce'])
-    ap.add_argument('--label_smoothing', type=float, default=0.1)
+    ap.add_argument('--label_smoothing', type=float, default=0.15)
     ap.add_argument('--label_noise', type=float, default=0.02)
     ap.add_argument('--disc_update_interval', type=int, default=1)
     ap.add_argument('--gen_updates', type=int, default=2,
