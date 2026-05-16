@@ -643,12 +643,53 @@ def save_sample(generator, test_ds, results_dir, epoch):
 
 
 def make_gif(results_dir, output_path):
-    frames = sorted(Path(results_dir).glob("epoch_*.png"))
-    if not frames:
+    """
+    Create GIF from epoch preview images with robust normalization.
+    Handles inconsistent image sizes, formats, and channel counts.
+    """
+    from PIL import Image
+    
+    # Find all preview images
+    image_files = sorted([
+        os.path.join(results_dir, f)
+        for f in os.listdir(results_dir)
+        if f.endswith((".png", ".jpg", ".jpeg"))
+    ])
+    
+    if not image_files:
+        print(f"[GIF] No images found in {results_dir}")
         return
-    images = [imageio.v2.imread(str(f)) for f in frames]
-    imageio.mimsave(output_path, images, fps=4)
-    print(f"[GIF] {output_path}")
+    
+    frames = []
+    TARGET_SIZE = (256, 256)  # Consistent frame size
+    
+    for file in image_files:
+        try:
+            img = Image.open(file)
+            
+            # Convert EVERYTHING to RGB (handles RGBA, grayscale, etc.)
+            img = img.convert("RGB")
+            
+            # Force identical size
+            img = img.resize(TARGET_SIZE)
+            
+            frame = np.array(img)
+            
+            # Debug: print shape for problematic frames
+            print(f"[GIF] {os.path.basename(file)}: {frame.shape}")
+            
+            frames.append(frame)
+        
+        except Exception as e:
+            print(f"[GIF] Skipping {file}: {e}")
+    
+    if len(frames) == 0:
+        print("[GIF] No valid frames found.")
+        return
+    
+    # All frames now guaranteed to be (256, 256, 3) RGB uint8
+    imageio.mimsave(output_path, frames, fps=4)
+    print(f"[GIF] Saved: {output_path} ({len(frames)} frames)")
 
 
 # -------------------------------------------------
