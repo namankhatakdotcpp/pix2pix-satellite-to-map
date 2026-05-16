@@ -13,8 +13,9 @@ Phase 2 additions vs Phase 1:
 
 import os
 
-# GPU Configuration — MUST be set BEFORE importing TensorFlow
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,6"
+# TensorFlow Configuration — MUST be set BEFORE importing TensorFlow
+# NOTE: CUDA_VISIBLE_DEVICES is set via shell, NOT in code
+# (set via: CUDA_VISIBLE_DEVICES=2 python src/train.py)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_DISABLE_LAYOUT_OPTIMIZER"] = "1"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
@@ -782,7 +783,8 @@ def main():
     # GPU / strategy
     gpus = tf.config.list_physical_devices('GPU')
     print(f"[GPU] Detected: {len(gpus)} GPU(s)")
-    print(f"[GPU] Using CUDA_VISIBLE_DEVICES=2,6 for stability")
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "ALL")
+    print(f"[GPU] CUDA_VISIBLE_DEVICES={visible_devices}")
     
     # Enable memory growth on visible GPUs
     for gpu in gpus:
