@@ -69,6 +69,9 @@ class SelfAttention(tf.keras.layers.Layer):
         super().build(input_shape)
 
     def call(self, x):
+        # Save original dtype for mixed precision compatibility
+        orig_dtype = x.dtype
+        
         shape = tf.shape(x)
         B, H, W = shape[0], shape[1], shape[2]
         HW = H * W
@@ -79,10 +82,19 @@ class SelfAttention(tf.keras.layers.Layer):
         k = tf.reshape(self.k_conv(x), [B, HW, reduced])
         v = tf.reshape(self.v_conv(x), [B, HW, C])
 
+        # Cast to float32 for numerically stable attention computation
+        q = tf.cast(q, tf.float32)
+        k = tf.cast(k, tf.float32)
+        v = tf.cast(v, tf.float32)
+
         scale = tf.math.sqrt(tf.cast(reduced, tf.float32))
         attn = tf.nn.softmax(tf.matmul(q, k, transpose_b=True) / scale, axis=-1)
 
         attended = tf.reshape(tf.matmul(attn, v), [B, H, W, C])
+        
+        # Cast output back to original dtype (FP16 if mixed precision, else FP32)
+        attended = tf.cast(attended, orig_dtype)
+        
         return self.gamma * self.out_conv(attended) + x
 
 
