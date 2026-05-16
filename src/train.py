@@ -798,13 +798,14 @@ def main():
         if args.require_gpu:
             raise RuntimeError("--require_gpu set but no GPU visible to TensorFlow.")
 
-    if args.multi_gpu and len(gpus) > 1:
+    # Strategy selection based on GPU availability (NOT on --multi_gpu flag)
+    # This ensures true single-GPU mode when only 1 GPU is visible
+    if len(gpus) > 1:
+        print(f"[GPU] Using MirroredStrategy on {len(gpus)} GPUs")
         strategy = tf.distribute.MirroredStrategy()
-        print(f"[GPU] MirroredStrategy over {strategy.num_replicas_in_sync} GPUs")
         effective_batch = args.batch_size * strategy.num_replicas_in_sync
     else:
-        if args.multi_gpu and len(gpus) <= 1:
-            print("[WARN] --multi_gpu set but ≤1 GPU visible. Using default strategy.")
+        print("[GPU] Using single GPU/default strategy (no replica graph overhead)")
         strategy = tf.distribute.get_strategy()
         effective_batch = args.batch_size
 
