@@ -33,6 +33,12 @@ import imageio
 from pathlib import Path
 from tqdm import tqdm
 
+# DIAGNOSTIC: Disable graph mode to isolate TensorFlow 2.19 graph runtime issues
+# This is a temporary debugging step - if training works in eager mode,
+# the root cause is TensorFlow graph compilation, NOT the GAN code.
+tf.config.run_functions_eagerly(True)
+print("[DEBUG] Running in EAGER MODE (tf.function disabled) — FOR DEBUGGING ONLY")
+
 # TensorFlow Addons removed due to version incompatibility with TF 2.19+
 # SpectralNormalization disabled for stability (use LayerNormalization instead)
 SpectralNormalization = None
