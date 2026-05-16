@@ -1109,7 +1109,7 @@ def main():
                     best_ssim = ssim_v
                     bp = os.path.join(args.savedir, 'best_generator.keras')
                     if tf.io.gfile.exists(bp):
-                        tf.io.gfile.delete(bp)
+                        tf.io.gfile.remove(bp)
                     generator.save(bp)
                     print(f"  [BEST] SSIM={best_ssim:.4f} at epoch {epoch + 1} -> {bp}")
 
@@ -1128,7 +1128,7 @@ def main():
     if args.export:
         ep = os.path.join(args.savedir, 'generator_final.keras')
         if tf.io.gfile.exists(ep):
-            tf.io.gfile.delete(ep)
+            tf.io.gfile.remove(ep)
         generator.save(ep)
         print(f"[EXPORT] {ep}")
 
