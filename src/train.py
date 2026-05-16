@@ -12,6 +12,10 @@ Phase 2 additions vs Phase 1:
 """
 
 import os
+
+os.environ["TF_DISABLE_LAYOUT_OPTIMIZER"] = "1"
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+
 import csv
 import argparse
 import time
