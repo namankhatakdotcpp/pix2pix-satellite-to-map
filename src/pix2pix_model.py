@@ -18,6 +18,16 @@ from tensorflow.keras.initializers import RandomNormal
 import os
 
 
+# ─────────────────────────────────────────────
+# CUSTOM LAYERS
+# ─────────────────────────────────────────────
+
+class NoDropout(tf.keras.layers.Layer):
+    """Identity layer — completely removes dropout from model graph."""
+    def call(self, x, training=None):
+        return x
+
+
 # Generator (U-Net style)
 
 def conv_block(x, filters, batchnorm=True):
@@ -35,7 +45,7 @@ def deconv_block(x, skip, filters, dropout=False):
                                kernel_initializer=init, use_bias=False)(x)
     x = layers.BatchNormalization()(x)
     if dropout:
-        x = layers.Dropout(0.0)(x)
+        x = NoDropout()(x)
     x = layers.Activation('relu')(x)
     x = layers.Concatenate()([x, skip])
     return x
