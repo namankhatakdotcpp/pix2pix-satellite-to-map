@@ -232,7 +232,9 @@ def upsample(filters, size, apply_dropout=False, norm_type='instance'):
     ))
     block.add(_norm(norm_type))
     if apply_dropout:
-        block.add(tf.keras.layers.Dropout(0.5))
+        # Dropout disabled temporarily — may cause graph corruption with distributed strategy
+        # block.add(tf.keras.layers.Dropout(0.5))
+        pass
     block.add(tf.keras.layers.ReLU())
     return block
 
