@@ -32,12 +32,10 @@ import imageio
 from pathlib import Path
 from tqdm import tqdm
 
-try:
-    from tensorflow_addons.layers import SpectralNormalization
-    TFA_AVAILABLE = True
-except Exception:
-    SpectralNormalization = None
-    TFA_AVAILABLE = False
+# TensorFlow Addons removed due to version incompatibility with TF 2.19+
+# SpectralNormalization disabled for stability (use LayerNormalization instead)
+SpectralNormalization = None
+TFA_AVAILABLE = False
 
 try:
     from skimage.metrics import structural_similarity as ssim_fn
@@ -830,10 +828,12 @@ def main():
     with strategy.scope():
         generator = build_generator(norm_type=args.generator_norm)
 
-        if args.spectral_norm and not TFA_AVAILABLE:
-            print("[WARN] --spectral_norm requires tensorflow-addons. Skipping.")
+        # SpectralNormalization removed - TensorFlow Addons incompatible with TF 2.19+
+        # Using LayerNormalization in discriminator instead
+        if args.spectral_norm:
+            print("[INFO] SpectralNormalization disabled (TensorFlow Addons removed for TF 2.19+ compatibility)")
             args.spectral_norm = False
-        discriminator = build_discriminator(use_spectral_norm=args.spectral_norm)
+        discriminator = build_discriminator(use_spectral_norm=False)
 
         perc_model = None
         if args.perceptual_lambda > 0:
