@@ -24,8 +24,18 @@ class InstanceNormalization(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         c = input_shape[-1]
-        self.scale = self.add_weight('scale', (c,), initializer='ones', trainable=True)
-        self.offset = self.add_weight('offset', (c,), initializer='zeros', trainable=True)
+        self.scale = self.add_weight(
+            name='scale',
+            shape=(c,),
+            initializer='ones',
+            trainable=True
+        )
+        self.offset = self.add_weight(
+            name='offset',
+            shape=(c,),
+            initializer='zeros',
+            trainable=True
+        )
 
     def call(self, x):
         mean, var = tf.nn.moments(x, axes=[1, 2], keepdims=True)
@@ -50,7 +60,12 @@ class SelfAttention(tf.keras.layers.Layer):
         self._channels = channels
 
     def build(self, input_shape):
-        self.gamma = self.add_weight('gamma', shape=(), initializer='zeros', trainable=True)
+        self.gamma = self.add_weight(
+            name='gamma',
+            shape=(),
+            initializer='zeros',
+            trainable=True
+        )
         super().build(input_shape)
 
     def call(self, x):
