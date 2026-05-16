@@ -18,37 +18,36 @@ from PIL import Image
 # ─────────────────────────────────────────────
 
 class InstanceNormalization(tf.keras.layers.Layer):
-    """Reproduced from train.py so saved .keras models load without error."""
     def __init__(self, epsilon=1e-5, **kwargs):
         super().__init__(**kwargs)
         self.epsilon = epsilon
 
     def build(self, input_shape):
         c = input_shape[-1]
-        self.scale  = self.add_weight('scale',  (c,), initializer='ones',  trainable=True)
+        self.scale = self.add_weight('scale', (c,), initializer='ones', trainable=True)
         self.offset = self.add_weight('offset', (c,), initializer='zeros', trainable=True)
 
     def call(self, x):
         mean, var = tf.nn.moments(x, axes=[1, 2], keepdims=True)
         return self.scale * (x - mean) / tf.sqrt(var + self.epsilon) + self.offset
 
-    def get_config(self):
-        cfg = super().get_config()
-        cfg.update({'epsilon': self.epsilon})
-        return cfg
-
 
 class SelfAttention(tf.keras.layers.Layer):
-    """Phase-2 generator bottleneck attention — reproduced from train.py."""
+    """
+    Channel self-attention (SAGAN-style) for the generator bottleneck.
+    Learns long-range spatial dependencies — critical for road-network coherence.
+    gamma is initialised to 0 so the layer starts as an identity and
+    gradually learns to contribute attention.
+    """
     def __init__(self, channels, **kwargs):
         super().__init__(**kwargs)
-        self._channels = channels
         reduced = max(1, channels // 8)
+        self.q_conv = tf.keras.layers.Conv2D(reduced, 1, use_bias=False)
+        self.k_conv = tf.keras.layers.Conv2D(reduced, 1, use_bias=False)
+        self.v_conv = tf.keras.layers.Conv2D(channels, 1, use_bias=False)
+        self.out_conv = tf.keras.layers.Conv2D(channels, 1, use_bias=False)
         self._reduced = reduced
-        self.q_conv   = tf.keras.layers.Conv2D(reduced,   1, use_bias=False)
-        self.k_conv   = tf.keras.layers.Conv2D(reduced,   1, use_bias=False)
-        self.v_conv   = tf.keras.layers.Conv2D(channels,  1, use_bias=False)
-        self.out_conv = tf.keras.layers.Conv2D(channels,  1, use_bias=False)
+        self._channels = channels
 
     def build(self, input_shape):
         self.gamma = self.add_weight('gamma', shape=(), initializer='zeros', trainable=True)
@@ -57,24 +56,19 @@ class SelfAttention(tf.keras.layers.Layer):
     def call(self, x):
         shape = tf.shape(x)
         B, H, W = shape[0], shape[1], shape[2]
-        HW      = H * W
+        HW = H * W
         reduced = self._reduced
-        C       = self._channels
+        C = self._channels
 
         q = tf.reshape(self.q_conv(x), [B, HW, reduced])
         k = tf.reshape(self.k_conv(x), [B, HW, reduced])
         v = tf.reshape(self.v_conv(x), [B, HW, C])
 
         scale = tf.math.sqrt(tf.cast(reduced, tf.float32))
-        attn  = tf.nn.softmax(tf.matmul(q, k, transpose_b=True) / scale, axis=-1)
+        attn = tf.nn.softmax(tf.matmul(q, k, transpose_b=True) / scale, axis=-1)
 
         attended = tf.reshape(tf.matmul(attn, v), [B, H, W, C])
         return self.gamma * self.out_conv(attended) + x
-
-    def get_config(self):
-        cfg = super().get_config()
-        cfg.update({'channels': self._channels})
-        return cfg
 
 
 # All custom objects in one place — extend here if new layers are added.
