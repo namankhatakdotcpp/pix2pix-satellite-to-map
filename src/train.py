@@ -20,6 +20,7 @@ os.environ["TF_DISABLE_LAYOUT_OPTIMIZER"] = "1"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 import csv
 import argparse
