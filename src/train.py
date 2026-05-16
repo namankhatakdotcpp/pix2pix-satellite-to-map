@@ -13,8 +13,13 @@ Phase 2 additions vs Phase 1:
 
 import os
 
+# GPU Configuration — MUST be set BEFORE importing TensorFlow
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,6"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_DISABLE_LAYOUT_OPTIMIZER"] = "1"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+os.environ["NCCL_DEBUG"] = "WARN"
+os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
 
 import csv
 import argparse
@@ -114,19 +119,19 @@ def build_dataset(data_dir, batch_size, is_train=True, split_order="map_sat",
         ds = ds.shuffle(len(image_files), reshuffle_each_iteration=True)
         ds = ds.map(
             lambda p: load_train_image(p, split_order),
-            num_parallel_calls=tf.data.AUTOTUNE,
+            num_parallel_calls=2,
         )
         if use_cache:
             ds = ds.cache()
-        ds = ds.shuffle(buffer_size).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        ds = ds.shuffle(buffer_size).batch(batch_size).prefetch(2)
     else:
         ds = ds.map(
             lambda p: load_test_image(p, split_order),
-            num_parallel_calls=tf.data.AUTOTUNE,
+            num_parallel_calls=2,
         )
         if use_cache:
             ds = ds.cache()
-        ds = ds.batch(1).prefetch(tf.data.AUTOTUNE)
+        ds = ds.batch(1).prefetch(2)
 
     return ds
 
@@ -729,6 +734,15 @@ def main():
     # GPU / strategy
     gpus = tf.config.list_physical_devices('GPU')
     print(f"[GPU] Detected: {len(gpus)} GPU(s)")
+    print(f"[GPU] Using CUDA_VISIBLE_DEVICES=2,6 for stability")
+    
+    # Enable memory growth on visible GPUs
+    for gpu in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(f"[GPU] Memory growth error: {e}")
+    
     if not gpus:
         print("[WARN] No GPUs found — training will be slow.")
         if args.require_gpu:
