@@ -489,37 +489,43 @@ def train_step(satellite, real_map, generator, discriminator,
             gen_total, gen_adv, gen_l1 = generator_loss(
                 disc_fake_out[0], gen_map, real_map, lambda_l1, gan_mode,
             )
-            # Cast generator loss components to float32 for mixed precision safety
-            gen_total = tf.cast(gen_total, tf.float32)
-            gen_adv = tf.cast(gen_adv, tf.float32)
-            gen_l1 = tf.cast(gen_l1, tf.float32)
 
             if fm_lambda > 0:
                 fm = feature_matching_loss_fn(disc_real_out[1:], disc_fake_out[1:])
-                # Cast scalar losses to float32 for mixed precision safety
-                fm = tf.cast(fm, tf.float32)
-                fm_lambda = tf.cast(fm_lambda, tf.float32)
-                gen_total = tf.cast(gen_total, tf.float32)
-                gen_total = gen_total + fm_lambda * fm
             else:
                 fm = tf.constant(0.0, dtype=tf.float32)
 
             perc = perceptual_loss_fn(perc_model, real_map, gen_map)
-            # Cast scalar losses to float32 for mixed precision safety
-            perc = tf.cast(perc, tf.float32)
-            perc_lambda = tf.cast(perc_lambda, tf.float32)
-            gen_total = tf.cast(gen_total, tf.float32)
-            gen_total = gen_total + perc_lambda * perc
 
             if ms_ssim_lambda > 0:
                 ms_ssim = ms_ssim_loss_fn(real_map, gen_map)
-                # Cast scalar losses to float32 for mixed precision safety
-                ms_ssim = tf.cast(ms_ssim, tf.float32)
-                ms_ssim_lambda = tf.cast(ms_ssim_lambda, tf.float32)
-                gen_total = tf.cast(gen_total, tf.float32)
-                gen_total = gen_total + ms_ssim_lambda * ms_ssim
             else:
                 ms_ssim = tf.constant(0.0, dtype=tf.float32)
+
+            # Cast all loss components to float32 for mixed precision safety (single pass)
+            gen_adv = tf.cast(gen_adv, tf.float32)
+            gen_l1 = tf.cast(gen_l1, tf.float32)
+            fm = tf.cast(fm, tf.float32)
+            perc = tf.cast(perc, tf.float32)
+            ms_ssim = tf.cast(ms_ssim, tf.float32)
+
+            # Aggregate all generator losses
+            gen_total = (
+                gen_adv
+                + tf.cast(lambda_l1, tf.float32) * gen_l1
+                + tf.cast(fm_lambda, tf.float32) * fm
+                + tf.cast(perc_lambda, tf.float32) * perc
+                + tf.cast(ms_ssim_lambda, tf.float32) * ms_ssim
+            )
+
+            # Check for numerical instability (NaN/Inf)
+            tf.debugging.check_numerics(gen_total, "gen_total NaN/Inf detected")
+            # Safeguard: replace any non-finite values with zero to prevent silent corruption
+            gen_total = tf.where(
+                tf.math.is_finite(gen_total),
+                gen_total,
+                tf.zeros_like(gen_total)
+            )
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
@@ -549,7 +555,18 @@ def train_step(satellite, real_map, generator, discriminator,
         # Cast scalar losses to float32 for mixed precision safety
         disc_loss = tf.cast(disc_loss, tf.float32)
         r1_penalty = tf.cast(r1_penalty, tf.float32)
+
+        # Aggregate discriminator losses
         disc_total = disc_loss + r1_penalty
+
+        # Check for numerical instability (NaN/Inf)
+        tf.debugging.check_numerics(disc_total, "disc_total NaN/Inf detected")
+        # Safeguard: replace any non-finite values with zero to prevent silent corruption
+        disc_total = tf.where(
+            tf.math.is_finite(disc_total),
+            disc_total,
+            tf.zeros_like(disc_total)
+        )
 
     disc_grads = dt.gradient(disc_total, discriminator.trainable_variables)
     disc_grads, _ = tf.clip_by_global_norm(disc_grads, 1.0)
