@@ -188,20 +188,32 @@ def compute_metrics(real_img: np.ndarray, pred_img: np.ndarray) -> dict:
 # ─────────────────────────────────────────────
 
 def load_generator(model_dir: str):
-    """Load generator from SavedModel or TF checkpoint directory."""
+    """Load generator from SavedModel or Keras model (.keras file)."""
     model_dir = Path(model_dir)
+    
     # Try SavedModel format first
     saved_model_path = model_dir / 'saved_model.pb'
     if saved_model_path.exists() or (model_dir / 'assets').exists():
         print(f"[MODEL] Loading SavedModel from {model_dir}")
         return tf.saved_model.load(str(model_dir))
-    # Try keras format
-    keras_path = model_dir / 'generator.keras'
-    if keras_path.exists():
-        print(f"[MODEL] Loading Keras model from {keras_path}")
-        return tf.keras.models.load_model(str(keras_path), custom_objects=_CUSTOM_OBJECTS)
+    
+    # Try common .keras model paths (in priority order)
+    keras_candidates = [
+        'best_generator.keras',      # From training with best SSIM
+        'generator_final.keras',     # From --export flag
+        'generator.keras',           # Fallback generic name
+    ]
+    
+    for keras_name in keras_candidates:
+        keras_path = model_dir / keras_name
+        if keras_path.exists():
+            print(f"[MODEL] Loading Keras model from {keras_path}")
+            return tf.keras.models.load_model(str(keras_path), custom_objects=_CUSTOM_OBJECTS)
+    
+    # If nothing found, provide helpful error
     raise FileNotFoundError(
         f"No SavedModel or .keras file found in {model_dir}.\n"
+        f"Expected one of: {', '.join(keras_candidates)}\n"
         f"Train first with: python src/train.py --export"
     )
 

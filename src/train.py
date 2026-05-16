@@ -1107,9 +1107,9 @@ def main():
                 # Save best model whenever SSIM improves
                 if ssim_v > best_ssim:
                     best_ssim = ssim_v
-                    bp = os.path.join(args.savedir, 'best_generator')
+                    bp = os.path.join(args.savedir, 'best_generator.keras')
                     if tf.io.gfile.exists(bp):
-                        tf.io.gfile.rmtree(bp)
+                        tf.io.gfile.delete(bp)
                     generator.save(bp)
                     print(f"  [BEST] SSIM={best_ssim:.4f} at epoch {epoch + 1} -> {bp}")
 
@@ -1126,9 +1126,9 @@ def main():
     make_gif(args.results_dir, 'outputs/training_progress.gif')
 
     if args.export:
-        ep = os.path.join(args.savedir, 'generator_final')
+        ep = os.path.join(args.savedir, 'generator_final.keras')
         if tf.io.gfile.exists(ep):
-            tf.io.gfile.rmtree(ep)
+            tf.io.gfile.delete(ep)
         generator.save(ep)
         print(f"[EXPORT] {ep}")
 
