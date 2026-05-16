@@ -35,7 +35,7 @@ def deconv_block(x, skip, filters, dropout=False):
                                kernel_initializer=init, use_bias=False)(x)
     x = layers.BatchNormalization()(x)
     if dropout:
-        x = layers.Dropout(0.5)(x)
+        x = layers.Dropout(0.0)(x)
     x = layers.Activation('relu')(x)
     x = layers.Concatenate()([x, skip])
     return x
