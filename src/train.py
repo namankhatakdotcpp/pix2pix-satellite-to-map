@@ -823,6 +823,7 @@ def main():
     ap.add_argument('--mode',       default='full', choices=['full', 'demo'])
     ap.add_argument('--demo_steps', type=int, default=5)
     ap.add_argument('--restore',    action='store_true', help='Resume from latest checkpoint.')
+    ap.add_argument('--resume',     type=str, default=None, help='Path to saved generator checkpoint (e.g., saved_models/generator_epoch_050.keras)')
     ap.add_argument('--export',     action='store_true')
     ap.add_argument('--multi_gpu',  action='store_true')
     ap.add_argument('--require_gpu',action='store_true')
@@ -890,6 +891,17 @@ def main():
     with strategy.scope():
         generator = build_generator(norm_type=args.generator_norm)
 
+        # Load generator from checkpoint if --resume specified
+        if args.resume is not None:
+            if os.path.exists(args.resume):
+                print(f"[RESUME] Loading generator weights from: {args.resume}")
+                generator = tf.keras.models.load_model(args.resume, custom_objects={
+                    'InstanceNormalization': InstanceNormalization,
+                    'SelfAttention': SelfAttention,
+                }, compile=False)
+            else:
+                print(f"[WARN] Resume checkpoint not found: {args.resume}")
+
         # SpectralNormalization removed - TensorFlow Addons incompatible with TF 2.19+
         # Using LayerNormalization in discriminator instead
         if args.spectral_norm:
@@ -929,6 +941,18 @@ def main():
         ckpt.restore(mgr.latest_checkpoint)
         start_epoch = int(epoch_var.numpy())
         print(f"[CKPT] Restored from {mgr.latest_checkpoint} -> resuming from epoch {start_epoch + 1}")
+    elif args.resume is not None:
+        # Try to extract epoch number from resume path (e.g., generator_epoch_050.keras)
+        try:
+            start_epoch = int(
+                os.path.basename(args.resume)
+                .split("_epoch_")[1]
+                .split(".")[0]
+            )
+            print(f"[RESUME] Extracted epoch {start_epoch} from checkpoint name")
+        except:
+            start_epoch = 0
+            print(f"[RESUME] Could not extract epoch from checkpoint name, starting from 0")
 
     sw       = tf.summary.create_file_writer(args.logdir)
     csv_path = init_csv_log(args.logdir)
@@ -1115,15 +1139,29 @@ def main():
 
         append_csv_log(csv_path, csv_row)
 
+        # Periodic checkpoint saving (every 10 epochs)
+        if (epoch + 1) % 10 == 0:
+            periodic_ckpt_path = os.path.join(args.savedir, f'generator_epoch_{epoch + 1:03d}.keras')
+            generator.save(periodic_ckpt_path)
+            print(f"  [PERIODIC] Saved epoch {epoch + 1:03d} -> {periodic_ckpt_path}")
+
         if (epoch + 1) % args.save_every == 0:
             epoch_var.assign(epoch + 1)
             print(f"  [CKPT] {mgr.save()}")
 
-    print(f"\n[DONE] Best SSIM: {best_ssim:.4f}")
+    print(f"[DONE] Training completed: Best SSIM={best_ssim:.4f}, epochs={args.epochs}")
     analyze_log(csv_path)
 
     os.makedirs('outputs', exist_ok=True)
     make_gif(args.results_dir, 'outputs/training_progress.gif')
+
+    # Print resume instructions
+    print(f"\n{'=' * 60}")
+    print(f"[SUMMARY] To continue training from saved checkpoints:")
+    print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume saved_models/best_generator.keras")
+    if (args.epochs > 10):
+        print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume saved_models/generator_epoch_050.keras")
+    print(f"{'=' * 60}\n")
 
     if args.export:
         ep = os.path.join(args.savedir, 'generator_final.keras')
@@ -1131,6 +1169,8 @@ def main():
             tf.io.gfile.remove(ep)
         generator.save(ep)
         print(f"[EXPORT] {ep}")
+        print(f"[SUMMARY] To continue from exported model:")
+        print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume {ep}")
 
 
 if __name__ == '__main__':
