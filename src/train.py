@@ -110,28 +110,41 @@ def load_test_image(image_path, split_order="map_sat"):
 
 def build_dataset(data_dir, batch_size, is_train=True, split_order="map_sat",
                   use_cache=True, buffer_size=400):
+    """
+    SIMPLIFIED DATASET PIPELINE FOR DEBUGGING
+    Removed: cache, prefetch, AUTOTUNE, map parallelism
+    This isolates tf.data variant tensor issues.
+    """
     image_files = list_image_files(data_dir)
     if not image_files:
         raise RuntimeError(f"No images found in {data_dir}")
 
     ds = tf.data.Dataset.from_tensor_slices(image_files)
+    
     if is_train:
         ds = ds.shuffle(len(image_files), reshuffle_each_iteration=True)
+        # Map with minimal parallelism (num_parallel_calls=1)
         ds = ds.map(
             lambda p: load_train_image(p, split_order),
-            num_parallel_calls=2,
+            num_parallel_calls=1,
         )
-        if use_cache:
-            ds = ds.cache()
-        ds = ds.shuffle(buffer_size).batch(batch_size).prefetch(2)
+        # NO cache, NO shuffle after cache, NO prefetch
+        ds = ds.batch(batch_size)
     else:
+        # Test dataset: minimal pipeline
         ds = ds.map(
             lambda p: load_test_image(p, split_order),
-            num_parallel_calls=2,
+            num_parallel_calls=1,
         )
-        if use_cache:
-            ds = ds.cache()
-        ds = ds.batch(1).prefetch(2)
+        # NO cache, NO prefetch
+        ds = ds.batch(1)
+
+    # Force CPU dataset execution - disable automatic sharding
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = (
+        tf.data.experimental.AutoShardPolicy.OFF
+    )
+    ds = ds.with_options(options)
 
     return ds
 
