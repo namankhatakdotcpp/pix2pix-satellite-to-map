@@ -204,6 +204,11 @@ class SelfAttention(tf.keras.layers.Layer):
         return self.gamma * self.out_conv(attended) + x
 
 
+class NoDropout(tf.keras.layers.Layer):
+    def call(self, x, training=None):
+        return x
+
+
 def _norm(norm_type):
     if norm_type == 'instance':
         return InstanceNormalization()
@@ -232,9 +237,7 @@ def upsample(filters, size, apply_dropout=False, norm_type='instance'):
     ))
     block.add(_norm(norm_type))
     if apply_dropout:
-        # Dropout disabled temporarily — may cause graph corruption with distributed strategy
-        # block.add(tf.keras.layers.Dropout(0.5))
-        pass
+        block.add(NoDropout())
     block.add(tf.keras.layers.ReLU())
     return block
 
