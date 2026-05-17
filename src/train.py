@@ -565,7 +565,9 @@ def train_step(satellite, real_map, generator, discriminator,
             )
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
+        # Stronger gradient clamping: global norm + element-wise clipping
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
+        gen_grads = [tf.clip_by_value(g, -0.1, 0.1) if g is not None else None for g in gen_grads]
         gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
 
     # ---- Discriminator update with R1 gradient penalty ----
@@ -802,7 +804,7 @@ def main():
     ap.add_argument('--lr',      type=float, default=None,
                     help='Legacy flag: overrides both gen_lr and disc_lr.')
     ap.add_argument('--gen_lr',  type=float, default=1e-4)
-    ap.add_argument('--disc_lr', type=float, default=1e-4)
+    ap.add_argument('--disc_lr', type=float, default=5e-5)
     ap.add_argument('--min_lr',  type=float, default=1e-7,
                     help='Floor LR for cosine annealing.')
 
@@ -817,7 +819,7 @@ def main():
                     dest='perceptual_lambda',       type=float, default=2.0)
     ap.add_argument('--feature_matching_lambda', '--lambda_fm',
                     dest='feature_matching_lambda', type=float, default=10.0)
-    ap.add_argument('--r1_gamma',      type=float, default=10.0,
+    ap.add_argument('--r1_gamma',      type=float, default=1.0,
                     help='R1 gradient-penalty coefficient (0 = disabled).')
 
     # GAN stability knobs
@@ -825,7 +827,7 @@ def main():
     ap.add_argument('--label_smoothing',    type=float, default=0.15)
     ap.add_argument('--label_noise',        type=float, default=0.02)
     ap.add_argument('--disc_update_interval', type=int, default=1)
-    ap.add_argument('--gen_updates',        type=int,   default=2,
+    ap.add_argument('--gen_updates',        type=int,   default=1,
                     help='Generator updates per discriminator update (TTUR).')
     ap.add_argument('--disc_input_noise_std', type=float, default=0.1,
                     help='Disc input noise std, annealed to 0 over first 50%% of training.')
