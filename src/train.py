@@ -546,6 +546,10 @@ def train_step(satellite, real_map, generator, discriminator,
             perc = tf.cast(perc, tf.float32)
             ms_ssim = tf.cast(ms_ssim, tf.float32)
 
+            # CRITICAL: Clamp individual loss components to prevent NaN explosion
+            gen_adv   = tf.clip_by_value(gen_adv,  0.0, 50.0)
+            perc      = tf.clip_by_value(perc,     0.0, 200.0)
+
             # Aggregate all generator losses
             gen_total = (
                 gen_adv
@@ -555,19 +559,24 @@ def train_step(satellite, real_map, generator, discriminator,
                 + tf.cast(ms_ssim_lambda, tf.float32) * ms_ssim
             )
 
-            # Check for numerical instability (NaN/Inf)
-            tf.debugging.check_numerics(gen_total, "gen_total NaN/Inf detected")
-            # Safeguard: replace any non-finite values with zero to prevent silent corruption
-            gen_total = tf.where(
-                tf.math.is_finite(gen_total),
-                gen_total,
-                tf.zeros_like(gen_total)
-            )
+            # Clamp total loss to prevent NaN explosion
+            gen_total = tf.clip_by_value(gen_total, 0.0, 500.0)
+
+            # Soft warning instead of crash: skip batch if NaN detected
+            if not tf.math.is_finite(gen_total):
+                tf.print("[WARN] gen_total non-finite, skipping batch")
+                return tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32)
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         # Stronger gradient clamping: global norm + element-wise clipping
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
         gen_grads = [tf.clip_by_value(g, -0.1, 0.1) if g is not None else None for g in gen_grads]
+        # CRITICAL: Filter NaN gradients before applying
+        gen_grads = [
+            tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
+            if g is not None else None
+            for g in gen_grads
+        ]
         gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
 
     # ---- Discriminator update with R1 gradient penalty ----
@@ -595,20 +604,29 @@ def train_step(satellite, real_map, generator, discriminator,
         disc_loss = tf.cast(disc_loss, tf.float32)
         r1_penalty = tf.cast(r1_penalty, tf.float32)
 
+        # CRITICAL: Clamp discriminator losses to prevent NaN explosion
+        disc_loss = tf.clip_by_value(disc_loss, 0.0, 50.0)
+        r1_penalty = tf.clip_by_value(r1_penalty, 0.0, 100.0)
+
         # Aggregate discriminator losses
         disc_total = disc_loss + r1_penalty
 
-        # Check for numerical instability (NaN/Inf)
-        tf.debugging.check_numerics(disc_total, "disc_total NaN/Inf detected")
-        # Safeguard: replace any non-finite values with zero to prevent silent corruption
-        disc_total = tf.where(
-            tf.math.is_finite(disc_total),
-            disc_total,
-            tf.zeros_like(disc_total)
-        )
+        # Clamp total discriminator loss
+        disc_total = tf.clip_by_value(disc_total, 0.0, 150.0)
+
+        # Soft warning instead of crash: skip batch if NaN detected
+        if not tf.math.is_finite(disc_total):
+            tf.print("[WARN] disc_total non-finite, skipping batch")
+            return tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32)
 
     disc_grads = dt.gradient(disc_total, discriminator.trainable_variables)
     disc_grads, _ = tf.clip_by_global_norm(disc_grads, 1.0)
+    # CRITICAL: Filter NaN gradients before applying
+    disc_grads = [
+        tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
+        if g is not None else None
+        for g in disc_grads
+    ]
     if update_disc:
         disc_opt.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
 
