@@ -159,6 +159,7 @@ def build_dataset(data_dir, batch_size, is_train=True, split_order="map_sat",
 # MODEL ARCHITECTURE
 # -------------------------------------------------
 
+@tf.keras.utils.register_keras_serializable()
 class InstanceNormalization(tf.keras.layers.Layer):
     def __init__(self, epsilon=1e-5, **kwargs):
         super().__init__(**kwargs)
@@ -183,7 +184,13 @@ class InstanceNormalization(tf.keras.layers.Layer):
         mean, var = tf.nn.moments(x, axes=[1, 2], keepdims=True)
         return self.scale * (x - mean) / tf.sqrt(var + self.epsilon) + self.offset
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({'epsilon': self.epsilon})
+        return config
 
+
+@tf.keras.utils.register_keras_serializable()
 class SelfAttention(tf.keras.layers.Layer):
     """
     Channel self-attention (SAGAN-style) for the generator bottleneck.
@@ -198,8 +205,8 @@ class SelfAttention(tf.keras.layers.Layer):
         self.k_conv = tf.keras.layers.Conv2D(reduced, 1, use_bias=False)
         self.v_conv = tf.keras.layers.Conv2D(channels, 1, use_bias=False)
         self.out_conv = tf.keras.layers.Conv2D(channels, 1, use_bias=False)
-        self._reduced = reduced
         self._channels = channels
+        self._reduced = reduced
 
     def build(self, input_shape):
         self.gamma = self.add_weight(
@@ -239,10 +246,22 @@ class SelfAttention(tf.keras.layers.Layer):
         
         return self.gamma * self.out_conv(attended) + x
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({'channels': self._channels})
+        return config
 
+
+@tf.keras.utils.register_keras_serializable()
 class NoDropout(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
     def call(self, x, training=None):
         return x
+
+    def get_config(self):
+        return super().get_config()
 
 
 def _norm(norm_type):
@@ -898,6 +917,7 @@ def main():
                 generator = tf.keras.models.load_model(args.resume, custom_objects={
                     'InstanceNormalization': InstanceNormalization,
                     'SelfAttention': SelfAttention,
+                    'NoDropout': NoDropout,
                 }, compile=False)
             else:
                 print(f"[WARN] Resume checkpoint not found: {args.resume}")
