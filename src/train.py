@@ -782,7 +782,7 @@ def main():
     # Learning rates
     ap.add_argument('--lr',      type=float, default=None,
                     help='Legacy flag: overrides both gen_lr and disc_lr.')
-    ap.add_argument('--gen_lr',  type=float, default=2e-4)
+    ap.add_argument('--gen_lr',  type=float, default=1e-4)
     ap.add_argument('--disc_lr', type=float, default=1e-4)
     ap.add_argument('--min_lr',  type=float, default=1e-7,
                     help='Floor LR for cosine annealing.')
@@ -795,7 +795,7 @@ def main():
     ap.add_argument('--ms_ssim_lambda',             type=float, default=80.0,
                     help='MS-SSIM loss weight (explicit SSIM optimisation).')
     ap.add_argument('--perceptual_lambda', '--lambda_perc',
-                    dest='perceptual_lambda',       type=float, default=10.0)
+                    dest='perceptual_lambda',       type=float, default=2.0)
     ap.add_argument('--feature_matching_lambda', '--lambda_fm',
                     dest='feature_matching_lambda', type=float, default=10.0)
     ap.add_argument('--r1_gamma',      type=float, default=10.0,
@@ -925,8 +925,8 @@ def main():
                 print(f"[WARN] VGG19 unavailable ({e}), perceptual_lambda=0")
                 args.perceptual_lambda = 0.0
 
-        gen_opt  = tf.keras.optimizers.Adam(learning_rate=args.gen_lr,  beta_1=0.5)
-        disc_opt = tf.keras.optimizers.Adam(learning_rate=args.disc_lr, beta_1=0.5)
+        gen_opt  = tf.keras.optimizers.Adam(learning_rate=args.gen_lr,  beta_1=0.5, clipnorm=1.0)
+        disc_opt = tf.keras.optimizers.Adam(learning_rate=args.disc_lr, beta_1=0.5, clipnorm=1.0)
 
         epoch_var = tf.Variable(0, trainable=False, dtype=tf.int64)
         ckpt = tf.train.Checkpoint(
