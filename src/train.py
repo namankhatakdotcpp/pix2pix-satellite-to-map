@@ -816,7 +816,7 @@ def main():
     ap.add_argument('--save_every',     type=int,   default=10)
     ap.add_argument('--eval_every',     type=int,   default=5)
     ap.add_argument('--sample_every',   type=int,   default=1)
-    ap.add_argument('--lr_schedule',    default='cosine', choices=['cosine', 'linear'])
+    ap.add_argument('--lr_schedule',    default='linear', choices=['cosine', 'linear'])
 
     # Learning rates
     ap.add_argument('--lr',      type=float, default=None,
