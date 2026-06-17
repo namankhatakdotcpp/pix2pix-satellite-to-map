@@ -462,7 +462,8 @@ def perceptual_loss_fn(perc_model, real_img, fake_img):
         real_f, fake_f = [real_f], [fake_f]
 
     losses = [tf.reduce_mean(tf.abs(tf.stop_gradient(r) - f)) for r, f in zip(real_f, fake_f)]
-    return tf.add_n(losses) / float(len(losses))
+    raw_loss = tf.add_n(losses) / float(len(losses))
+    return raw_loss / 128.0  # normalize VGG19 range ~110-160 → ~0.85-1.25
 
 
 def feature_matching_loss_fn(real_feats, fake_feats):
@@ -520,8 +521,9 @@ def train_step(satellite, real_map, generator, discriminator,
         with tf.GradientTape() as gt:
             gen_map = generator(satellite, training=True)
 
-            disc_real_out = discriminator([satellite, add_noise(real_map)], training=False)
-            disc_fake_out = discriminator([satellite, add_noise(gen_map)],  training=False)
+            real_map_f32_gen = tf.cast(real_map, tf.float32)
+            disc_real_out = discriminator([satellite, add_noise(real_map_f32_gen)], training=True)
+            disc_fake_out = discriminator([satellite, add_noise(gen_map)],           training=True)
 
             gen_total, gen_adv, gen_l1 = generator_loss(
                 disc_fake_out[0], gen_map, real_map, lambda_l1, gan_mode,
@@ -529,6 +531,7 @@ def train_step(satellite, real_map, generator, discriminator,
 
             if fm_lambda > 0:
                 fm = feature_matching_loss_fn(disc_real_out[1:], disc_fake_out[1:])
+                tf.print("DEBUG fm:", fm)  # remove after first confirmed run
             else:
                 fm = tf.constant(0.0, dtype=tf.float32)
 
@@ -816,7 +819,7 @@ def main():
     ap.add_argument('--save_every',     type=int,   default=10)
     ap.add_argument('--eval_every',     type=int,   default=5)
     ap.add_argument('--sample_every',   type=int,   default=1)
-    ap.add_argument('--lr_schedule',    default='cosine', choices=['cosine', 'linear'])
+    ap.add_argument('--lr_schedule',    default='linear', choices=['cosine', 'linear'])
 
     # Learning rates
     ap.add_argument('--lr',      type=float, default=None,
@@ -834,9 +837,9 @@ def main():
     ap.add_argument('--ms_ssim_lambda',             type=float, default=80.0,
                     help='MS-SSIM loss weight (explicit SSIM optimisation).')
     ap.add_argument('--perceptual_lambda', '--lambda_perc',
-                    dest='perceptual_lambda',       type=float, default=2.0)
+                    dest='perceptual_lambda',       type=float, default=10.0)
     ap.add_argument('--feature_matching_lambda', '--lambda_fm',
-                    dest='feature_matching_lambda', type=float, default=10.0)
+                    dest='feature_matching_lambda', type=float, default=20.0)
     ap.add_argument('--r1_gamma',      type=float, default=1.0,
                     help='R1 gradient-penalty coefficient (0 = disabled).')
 
@@ -863,6 +866,8 @@ def main():
     ap.add_argument('--demo_steps', type=int, default=5)
     ap.add_argument('--restore',    action='store_true', help='Resume from latest checkpoint.')
     ap.add_argument('--resume',     type=str, default=None, help='Path to saved generator checkpoint (e.g., saved_models/generator_epoch_050.keras)')
+    ap.add_argument('--resume_disc', default=None,
+                    help='Path to discriminator checkpoint to resume from')
     ap.add_argument('--export',     action='store_true')
     ap.add_argument('--multi_gpu',  action='store_true')
     ap.add_argument('--require_gpu',action='store_true')
@@ -942,12 +947,20 @@ def main():
             else:
                 print(f"[WARN] Resume checkpoint not found: {args.resume}")
 
+        discriminator = build_discriminator(use_spectral_norm=False)
+
+        if args.resume_disc and os.path.exists(args.resume_disc):
+            try:
+                discriminator = tf.keras.models.load_model(args.resume_disc, compile=False)
+                print(f"[RESUME] Loaded discriminator weights from: {args.resume_disc}")
+            except Exception as e:
+                print(f"[RESUME] Could not load discriminator weights: {e}")
+
         # SpectralNormalization removed - TensorFlow Addons incompatible with TF 2.19+
         # Using LayerNormalization in discriminator instead
         if args.spectral_norm:
             print("[INFO] SpectralNormalization disabled (TensorFlow Addons removed for TF 2.19+ compatibility)")
             args.spectral_norm = False
-        discriminator = build_discriminator(use_spectral_norm=False)
 
         perc_model = None
         if args.perceptual_lambda > 0:
@@ -1175,6 +1188,7 @@ def main():
                     if tf.io.gfile.exists(bp):
                         tf.io.gfile.remove(bp)
                     generator.save(bp)
+                    discriminator.save(os.path.join(args.savedir, 'best_discriminator.keras'))
                     print(f"  [BEST] SSIM={best_ssim:.4f} at epoch {epoch + 1} -> {bp}")
 
         append_csv_log(csv_path, csv_row)
@@ -1183,6 +1197,8 @@ def main():
         if (epoch + 1) % 10 == 0:
             periodic_ckpt_path = os.path.join(args.savedir, f'generator_epoch_{epoch + 1:03d}.keras')
             generator.save(periodic_ckpt_path)
+            disc_ckpt_path = periodic_ckpt_path.replace('generator_', 'discriminator_')
+            discriminator.save(disc_ckpt_path)
             print(f"  [PERIODIC] Saved epoch {epoch + 1:03d} -> {periodic_ckpt_path}")
 
         if (epoch + 1) % args.save_every == 0:
@@ -1198,9 +1214,12 @@ def main():
     # Print resume instructions
     print(f"\n{'=' * 60}")
     print(f"[SUMMARY] To continue training from saved checkpoints:")
-    print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume saved_models/best_generator.keras")
-    if (args.epochs > 10):
-        print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume saved_models/generator_epoch_050.keras")
+    print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py "
+          f"--resume {args.savedir}/best_generator.keras "
+          f"--resume_disc {args.savedir}/best_discriminator.keras")
+    if args.epochs > 10:
+        print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume {args.savedir}/generator_epoch_050.keras "
+              f"--resume_disc {args.savedir}/discriminator_epoch_050.keras")
     print(f"{'=' * 60}\n")
 
     if args.export:
