@@ -341,15 +341,120 @@ def build_generator(norm_type='instance'):
     return tf.keras.Model(inputs=inputs, outputs=last(x))
 
 
-def build_discriminator(use_spectral_norm=False):
+def residual_block(x, filters):
+    """Standard residual block: conv-norm-relu-conv-norm + skip connection."""
+    skip = x
+    x = tf.keras.layers.Conv2D(filters, 3, padding='same',
+                                kernel_initializer=tf.random_normal_initializer(0., 0.02))(x)
+    x = InstanceNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.Conv2D(filters, 3, padding='same',
+                                kernel_initializer=tf.random_normal_initializer(0., 0.02))(x)
+    x = InstanceNormalization()(x)
+    return tf.keras.layers.Add()([x, skip])
+
+
+def build_global_generator(norm_type='instance'):
     """
-    PatchGAN discriminator (70x70 receptive field) with LayerNorm.
+    G1: U-Net generator at half resolution (128x128).
+    Identical architecture to build_generator() but with one fewer
+    downsample/upsample pair to match the smaller spatial dimensions.
+    SelfAttention at 4x4 bottleneck (index 3 after 4th downsample).
+    """
+    inputs = tf.keras.layers.Input(shape=[128, 128, 3])
+    init = tf.random_normal_initializer(0., 0.02)
+
+    down_stack = [
+        downsample(64,  4, apply_norm=False, norm_type=norm_type),  # → 64
+        downsample(128, 4, norm_type=norm_type),                     # → 32
+        downsample(256, 4, norm_type=norm_type),                     # → 16
+        downsample(512, 4, norm_type=norm_type),                     # → 8
+        downsample(512, 4, norm_type=norm_type),                     # → 4
+        downsample(512, 4, norm_type=norm_type),                     # → 2
+        downsample(512, 4, norm_type=norm_type),                     # → 1 (bottleneck)
+    ]
+
+    up_stack = [
+        upsample(512, 4, apply_dropout=True, norm_type=norm_type),
+        upsample(512, 4, apply_dropout=True, norm_type=norm_type),
+        upsample(512, 4, norm_type=norm_type),
+        upsample(256, 4, norm_type=norm_type),
+        upsample(128, 4, norm_type=norm_type),
+        upsample(64,  4, norm_type=norm_type),
+    ]
+
+    last = tf.keras.layers.Conv2DTranspose(
+        3, 4, strides=2, padding='same',
+        kernel_initializer=init, activation='tanh', dtype='float32',
+    )
+
+    x = inputs
+    skips = []
+    for i, down in enumerate(down_stack):
+        x = down(x)
+        if i == 3:
+            x = SelfAttention(512, name='g1_bottleneck_attn')(x)
+        skips.append(x)
+    skips = reversed(skips[:-1])
+
+    for up, skip in zip(up_stack, skips):
+        x = up(x)
+        x = tf.keras.layers.Concatenate()([x, skip])
+
+    return tf.keras.Model(inputs=inputs, outputs=last(x), name='global_generator')
+
+
+def build_local_enhancer(global_generator, input_shape=(256, 256, 3)):
+    """
+    G2: takes 256x256 input, downsamples to 128x128 for G1,
+    combines G1 features with local front-end, refines via ResBlocks.
+    """
+    init = tf.random_normal_initializer(0., 0.02)
+    inp = tf.keras.layers.Input(shape=input_shape)
+
+    # Front-end: downsample 256 -> 128 with feature extraction
+    front = tf.keras.layers.Conv2D(64, 7, strides=1, padding='same',
+                                    kernel_initializer=init)(inp)
+    front = InstanceNormalization()(front)
+    front = tf.keras.layers.ReLU()(front)
+
+    front = tf.keras.layers.Conv2D(64, 4, strides=2, padding='same',
+                                    kernel_initializer=init)(front)
+    front = InstanceNormalization()(front)
+    front = tf.keras.layers.ReLU()(front)  # 128x128x64
+
+    # Downsample input for G1
+    inp_downsampled = tf.keras.layers.AveragePooling2D(pool_size=2)(inp)
+    global_out = global_generator(inp_downsampled)  # 128x128x3
+
+    # Combine G1 output with local front-end features
+    combined = tf.keras.layers.Concatenate()([front, global_out])  # 128x128x67
+
+    # Back-end: upsample to 256, refine with residual blocks
+    x = tf.keras.layers.Conv2DTranspose(64, 4, strides=2, padding='same',
+                                         kernel_initializer=init)(combined)
+    x = InstanceNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)  # 256x256x64
+
+    for _ in range(3):
+        x = residual_block(x, 64)
+
+    x = tf.keras.layers.Conv2D(3, 7, padding='same', activation='tanh',
+                                kernel_initializer=init, dtype='float32')(x)
+
+    return tf.keras.Model(inputs=inp, outputs=x, name='local_enhancer')
+
+
+def build_discriminator(use_spectral_norm=False, input_size=256):
+    """
+    PatchGAN discriminator with LayerNorm.
     Returns [patch_logits, f1, f2, f3, f4] for feature-matching loss.
+    input_size: spatial resolution of inputs (256 for full-res, 128 for half, 64 for quarter).
     """
     initializer = tf.random_normal_initializer(0., 0.02)
 
-    inp = tf.keras.layers.Input(shape=[256, 256, 3], name='input_image')
-    tar = tf.keras.layers.Input(shape=[256, 256, 3], name='target_image')
+    inp = tf.keras.layers.Input(shape=[input_size, input_size, 3], name='input_image')
+    tar = tf.keras.layers.Input(shape=[input_size, input_size, 3], name='target_image')
     x = tf.keras.layers.Concatenate()([inp, tar])
 
     def conv2d(*args, **kwargs):
@@ -378,6 +483,14 @@ def build_discriminator(use_spectral_norm=False):
                    kernel_initializer=initializer, dtype='float32')(f4)
 
     return tf.keras.Model(inputs=[inp, tar], outputs=[patch, f1, f2, f3, f4])
+
+
+def build_multiscale_discriminators(use_spectral_norm=False):
+    """Returns 3 PatchGAN discriminators for full-res, half-res, quarter-res inputs."""
+    d1 = build_discriminator(use_spectral_norm=use_spectral_norm, input_size=256)
+    d2 = build_discriminator(use_spectral_norm=use_spectral_norm, input_size=128)
+    d3 = build_discriminator(use_spectral_norm=use_spectral_norm, input_size=64)
+    return [d1, d2, d3]
 
 
 # -------------------------------------------------
@@ -482,31 +595,49 @@ def cosine_lr(initial_lr, epoch, total_epochs, min_lr=1e-7, warmup_epochs=0):
 # TRAIN STEP
 # -------------------------------------------------
 
+def get_pyramid(img, num_scales):
+    """Returns [full_res, half_res, quarter_res, ...] via average pooling."""
+    pyramid = [img]
+    x = img
+    for _ in range(num_scales - 1):
+        x = tf.nn.avg_pool2d(x, ksize=2, strides=2, padding='VALID')
+        pyramid.append(x)
+    return pyramid
+
+
 @tf.function
-def train_step(satellite, real_map, generator, discriminator,
+def train_step(satellite, real_map, generator, discriminators,
                gen_opt, disc_opt, lambda_l1, label_smoothing, label_noise,
                fm_lambda, perc_model, perc_lambda, gan_mode, update_disc,
                gen_updates, disc_input_noise_std, ms_ssim_lambda, r1_gamma):
     """
-    Single distributed training step.
+    Single distributed training step with multi-scale discriminator support.
 
+    discriminators: list of PatchGAN discriminators (len 1 for vanilla, len 3 for Pix2PixHD).
     Generator loss  = LSGAN_adv + λ_l1*L1 + λ_ms*MS-SSIM + λ_fm*FM + λ_perc*Perceptual
     Discriminator loss = LSGAN + R1 gradient penalty (prevents collapse)
     """
+    _ZEROS = tf.constant(0.0, dtype=tf.float32)
+    _ZERO_RETURN = (_ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS)
+    num_scales = len(discriminators)
 
     def add_noise(x):
         if disc_input_noise_std <= 0:
             return x
         return x + tf.random.normal(tf.shape(x), 0.0, disc_input_noise_std, dtype=x.dtype)
 
-    gen_total = tf.constant(0.0, dtype=tf.float32)
-    gen_adv   = tf.constant(0.0, dtype=tf.float32)
-    gen_l1    = tf.constant(0.0, dtype=tf.float32)
-    fm        = tf.constant(0.0, dtype=tf.float32)
-    perc      = tf.constant(0.0, dtype=tf.float32)
-    ms_ssim   = tf.constant(0.0, dtype=tf.float32)
-    # Initialise gen_map so it is always bound before the discriminator step.
+    gen_total = _ZEROS
+    gen_adv   = _ZEROS
+    gen_l1    = _ZEROS
+    fm        = _ZEROS
+    perc      = _ZEROS
+    ms_ssim   = _ZEROS
     gen_map   = generator(satellite, training=False)
+
+    # Collect all discriminator trainable variables for gradient computation
+    disc_all_vars = []
+    for d in discriminators:
+        disc_all_vars.extend(d.trainable_variables)
 
     # ---- Generator updates ----
     for _ in range(max(1, gen_updates)):
@@ -514,38 +645,52 @@ def train_step(satellite, real_map, generator, discriminator,
             gen_map = generator(satellite, training=True)
 
             real_map_f32_gen = tf.cast(real_map, tf.float32)
-            disc_real_out = discriminator([satellite, add_noise(real_map_f32_gen)], training=True)
-            disc_fake_out = discriminator([satellite, add_noise(gen_map)],           training=True)
+            gen_map_f32 = tf.cast(gen_map, tf.float32)
 
-            gen_total, gen_adv, gen_l1 = generator_loss(
-                disc_fake_out[0], gen_map, real_map, lambda_l1, gan_mode,
-            )
+            # Build pyramids for multi-scale discriminators
+            sat_pyramid  = get_pyramid(tf.cast(satellite, tf.float32), num_scales)
+            real_pyramid = get_pyramid(real_map_f32_gen, num_scales)
+            fake_pyramid = get_pyramid(gen_map_f32, num_scales)
 
-            if fm_lambda > 0:
-                fm = feature_matching_loss_fn(disc_real_out[1:], disc_fake_out[1:])
-                tf.print("DEBUG fm:", fm)  # remove after first confirmed run
-            else:
-                fm = tf.constant(0.0, dtype=tf.float32)
+            # Accumulate adversarial + FM loss across all discriminator scales
+            adv_sum = _ZEROS
+            fm_sum  = _ZEROS
+            for d, sat_s, real_s, fake_s in zip(discriminators, sat_pyramid, real_pyramid, fake_pyramid):
+                d_real_out = d([sat_s, add_noise(real_s)], training=True)
+                d_fake_out = d([sat_s, add_noise(fake_s)], training=True)
+
+                if gan_mode == 'lsgan':
+                    adv_s = tf.reduce_mean(tf.square(tf.cast(d_fake_out[0], tf.float32) - 1.0))
+                else:
+                    adv_s = bce_loss(tf.ones_like(d_fake_out[0]), d_fake_out[0])
+                adv_sum += adv_s
+
+                if fm_lambda > 0:
+                    fm_s = feature_matching_loss_fn(d_real_out[1:], d_fake_out[1:])
+                    fm_sum += fm_s
+
+            gen_adv = adv_sum / tf.cast(num_scales, tf.float32)
+            fm = fm_sum / tf.cast(num_scales, tf.float32) if fm_lambda > 0 else _ZEROS
+
+            l1 = tf.reduce_mean(tf.abs(tf.cast(real_map, tf.float32) - gen_map_f32))
+            gen_l1 = l1
 
             perc = perceptual_loss_fn(perc_model, real_map, gen_map)
 
             if ms_ssim_lambda > 0:
                 ms_ssim = ms_ssim_loss_fn(real_map, gen_map)
             else:
-                ms_ssim = tf.constant(0.0, dtype=tf.float32)
+                ms_ssim = _ZEROS
 
-            # Cast all loss components to float32 for mixed precision safety (single pass)
             gen_adv = tf.cast(gen_adv, tf.float32)
             gen_l1 = tf.cast(gen_l1, tf.float32)
             fm = tf.cast(fm, tf.float32)
             perc = tf.cast(perc, tf.float32)
             ms_ssim = tf.cast(ms_ssim, tf.float32)
 
-            # CRITICAL: Clamp individual loss components to prevent NaN explosion
-            gen_adv   = tf.clip_by_value(gen_adv,  0.0, 50.0)
-            perc      = tf.clip_by_value(perc,     0.0, 200.0)
+            gen_adv = tf.clip_by_value(gen_adv, 0.0, 50.0)
+            perc    = tf.clip_by_value(perc,    0.0, 200.0)
 
-            # Aggregate all generator losses
             gen_total = (
                 gen_adv
                 + tf.cast(lambda_l1, tf.float32) * gen_l1
@@ -554,18 +699,14 @@ def train_step(satellite, real_map, generator, discriminator,
                 + tf.cast(ms_ssim_lambda, tf.float32) * ms_ssim
             )
 
-            # Clamp total loss to prevent NaN explosion
             gen_total = tf.clip_by_value(gen_total, 0.0, 500.0)
 
-            # Soft warning instead of crash: skip batch if NaN detected
             if not tf.math.is_finite(gen_total):
                 tf.print("[WARN] gen_total non-finite, skipping batch")
-                return tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32)
+                return _ZERO_RETURN
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
-        # Stronger gradient clamping: global norm + element-wise clipping
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
-        # CRITICAL: Filter NaN gradients before applying
         gen_grads = [
             tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
             if g is not None else None
@@ -573,56 +714,59 @@ def train_step(satellite, real_map, generator, discriminator,
         ]
         gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
 
-    # ---- Discriminator update with R1 gradient penalty ----
-    real_map_f32  = tf.cast(real_map, tf.float32)
-    gen_map_disc  = tf.stop_gradient(tf.cast(gen_map, tf.float32))
+    # ---- Discriminator update with R1 gradient penalty (multi-scale) ----
+    real_map_f32 = tf.cast(real_map, tf.float32)
+    gen_map_disc = tf.stop_gradient(tf.cast(gen_map, tf.float32))
+
+    sat_pyramid  = get_pyramid(tf.cast(satellite, tf.float32), num_scales)
+    real_pyramid = get_pyramid(real_map_f32, num_scales)
+    fake_pyramid = get_pyramid(gen_map_disc, num_scales)
 
     with tf.GradientTape() as dt:
-        # R1 penalty: penalise ||∇_x D(x_real)||² to prevent D from becoming
-        # arbitrarily sharp on real inputs, which causes the observed collapse.
-        with tf.GradientTape() as r1_tape:
-            r1_tape.watch(real_map_f32)
-            disc_real_out = discriminator([satellite, add_noise(real_map_f32)], training=True)
-            real_patch = tf.cast(disc_real_out[0], tf.float32)
-        r1_grads  = r1_tape.gradient(real_patch, real_map_f32)
-        r1_penalty = r1_gamma * 0.5 * tf.reduce_mean(
-            tf.reduce_sum(tf.square(r1_grads), axis=[1, 2, 3])
-        )
+        disc_loss_sum = _ZEROS
+        r1_penalty_sum = _ZEROS
 
-        disc_fake_out = discriminator([satellite, add_noise(gen_map_disc)], training=True)
-        disc_loss = discriminator_loss(
-            disc_real_out[0], disc_fake_out[0],
-            label_smoothing, label_noise, gan_mode,
-        )
-        # Cast scalar losses to float32 for mixed precision safety
-        disc_loss = tf.cast(disc_loss, tf.float32)
-        r1_penalty = tf.cast(r1_penalty, tf.float32)
+        for d, sat_s, real_s, fake_s in zip(discriminators, sat_pyramid, real_pyramid, fake_pyramid):
+            # R1 penalty on this scale's real input
+            with tf.GradientTape() as r1_tape:
+                r1_tape.watch(real_s)
+                d_real_out = d([sat_s, add_noise(real_s)], training=True)
+                real_patch = tf.cast(d_real_out[0], tf.float32)
+            r1_grads = r1_tape.gradient(real_patch, real_s)
+            r1_pen = r1_gamma * 0.5 * tf.reduce_mean(
+                tf.reduce_sum(tf.square(r1_grads), axis=[1, 2, 3])
+            )
+            r1_penalty_sum += r1_pen
 
-        # CRITICAL: Clamp discriminator losses to prevent NaN explosion
-        disc_loss = tf.clip_by_value(disc_loss, 0.0, 50.0)
+            d_fake_out = d([sat_s, add_noise(fake_s)], training=True)
+            d_loss = discriminator_loss(
+                d_real_out[0], d_fake_out[0],
+                label_smoothing, label_noise, gan_mode,
+            )
+            disc_loss_sum += tf.cast(d_loss, tf.float32)
+
+        disc_loss_avg = disc_loss_sum / tf.cast(num_scales, tf.float32)
+        r1_penalty = r1_penalty_sum / tf.cast(num_scales, tf.float32)
+
+        disc_loss_avg = tf.clip_by_value(disc_loss_avg, 0.0, 50.0)
         r1_penalty = tf.clip_by_value(r1_penalty, 0.0, 100.0)
 
-        # Aggregate discriminator losses
-        disc_total = disc_loss + r1_penalty
-
-        # Clamp total discriminator loss
+        disc_total = disc_loss_avg + r1_penalty
         disc_total = tf.clip_by_value(disc_total, 0.0, 150.0)
 
-        # Soft warning instead of crash: skip batch if NaN detected
         if not tf.math.is_finite(disc_total):
             tf.print("[WARN] disc_total non-finite, skipping batch")
-            return tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32), tf.constant(0.0, dtype=tf.float32)
+            return _ZERO_RETURN
 
-    disc_grads = dt.gradient(disc_total, discriminator.trainable_variables)
+    disc_grads = dt.gradient(disc_total, disc_all_vars)
     disc_grads, _ = tf.clip_by_global_norm(disc_grads, 1.0)
-    # CRITICAL: Filter NaN gradients before applying
     disc_grads = [
         tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
         if g is not None else None
         for g in disc_grads
     ]
     if update_disc:
-        disc_opt.apply_gradients(zip(disc_grads, discriminator.trainable_variables))
+        disc_opt.apply_gradients(zip(disc_grads, disc_all_vars))
 
     return gen_total, gen_adv, gen_l1, disc_total, fm, perc, ms_ssim, r1_penalty
 
@@ -847,6 +991,10 @@ def main():
     # Architecture
     ap.add_argument('--generator_norm', default='instance', choices=['instance', 'batch'])
     ap.add_argument('--spectral_norm',  action='store_true')
+    ap.add_argument('--use_pix2pixhd', action='store_true', default=False,
+                    help='Use Pix2PixHD architecture (coarse-to-fine generator + multi-scale discriminator)')
+    ap.add_argument('--g1_pretrain_epochs', type=int, default=0,
+                    help='Epochs to train G1 alone before introducing G2 (0 = train jointly)')
 
     # Dataset
     ap.add_argument('--split_order',   default='map_sat', choices=['map_sat', 'sat_map'])
@@ -924,28 +1072,54 @@ def main():
     print(f"[DATA] {n_train} images | {steps_per_epoch} steps/epoch")
 
     with strategy.scope():
-        generator = build_generator(norm_type=args.generator_norm)
+        custom_objects = {
+            'InstanceNormalization': InstanceNormalization,
+            'SelfAttention': SelfAttention,
+            'NoDropout': NoDropout,
+        }
+
+        if args.use_pix2pixhd:
+            print("[MODEL] Using Pix2PixHD architecture (multi-scale)")
+            global_gen = build_global_generator(norm_type=args.generator_norm)
+            generator = build_local_enhancer(global_gen)
+            discriminators = build_multiscale_discriminators(use_spectral_norm=False)
+        else:
+            print("[MODEL] Using standard Pix2Pix architecture")
+            generator = build_generator(norm_type=args.generator_norm)
+            discriminators = [build_discriminator(use_spectral_norm=False)]
 
         # Load generator from checkpoint if --resume specified
         if args.resume is not None:
             if os.path.exists(args.resume):
                 print(f"[RESUME] Loading generator weights from: {args.resume}")
-                generator = tf.keras.models.load_model(args.resume, custom_objects={
-                    'InstanceNormalization': InstanceNormalization,
-                    'SelfAttention': SelfAttention,
-                    'NoDropout': NoDropout,
-                }, compile=False)
+                generator = tf.keras.models.load_model(
+                    args.resume, custom_objects=custom_objects, compile=False)
             else:
                 print(f"[WARN] Resume checkpoint not found: {args.resume}")
 
-        discriminator = build_discriminator(use_spectral_norm=False)
-
+        # Load discriminator(s) from checkpoint if --resume_disc specified
         if args.resume_disc and os.path.exists(args.resume_disc):
-            try:
-                discriminator = tf.keras.models.load_model(args.resume_disc, compile=False)
-                print(f"[RESUME] Loaded discriminator weights from: {args.resume_disc}")
-            except Exception as e:
-                print(f"[RESUME] Could not load discriminator weights: {e}")
+            if args.use_pix2pixhd:
+                loaded_discs = []
+                for i in range(3):
+                    path = args.resume_disc.replace('.keras', f'_d{i+1}.keras')
+                    if os.path.exists(path):
+                        try:
+                            loaded_discs.append(tf.keras.models.load_model(path, compile=False))
+                            print(f"[RESUME] Loaded discriminator d{i+1} from: {path}")
+                        except Exception as e:
+                            print(f"[RESUME] Could not load d{i+1}: {e}, using fresh")
+                            loaded_discs.append(discriminators[i])
+                    else:
+                        print(f"[RESUME] d{i+1} not found at {path}, using fresh")
+                        loaded_discs.append(discriminators[i])
+                discriminators = loaded_discs
+            else:
+                try:
+                    discriminators = [tf.keras.models.load_model(args.resume_disc, compile=False)]
+                    print(f"[RESUME] Loaded discriminator weights from: {args.resume_disc}")
+                except Exception as e:
+                    print(f"[RESUME] Could not load discriminator weights: {e}")
 
         # SpectralNormalization removed - TensorFlow Addons incompatible with TF 2.19+
         # Using LayerNormalization in discriminator instead
@@ -973,10 +1147,13 @@ def main():
         disc_opt = tf.keras.optimizers.Adam(learning_rate=args.disc_lr, beta_1=0.5, clipnorm=1.0)
 
         epoch_var = tf.Variable(0, trainable=False, dtype=tf.int64)
-        ckpt = tf.train.Checkpoint(
-            generator=generator, discriminator=discriminator,
-            gen_opt=gen_opt, disc_opt=disc_opt, epoch=epoch_var,
-        )
+        ckpt_kwargs = {
+            'generator': generator,
+            'gen_opt': gen_opt, 'disc_opt': disc_opt, 'epoch': epoch_var,
+        }
+        for i, d in enumerate(discriminators):
+            ckpt_kwargs[f'discriminator_{i}'] = d
+        ckpt = tf.train.Checkpoint(**ckpt_kwargs)
 
     mgr = tf.train.CheckpointManager(ckpt, args.savedir, max_to_keep=5)
 
@@ -1002,9 +1179,10 @@ def main():
     csv_path = init_csv_log(args.logdir)
     best_ssim = 0.0
 
+    arch_name = 'Pix2PixHD' if args.use_pix2pixhd else 'Pix2Pix'
     print(f"\n{'=' * 60}")
-    print(f"  Pix2Pix Phase 2 | {args.epochs} epochs | LR={args.lr_schedule}")
-    print(f"  L1={args.lambda_l1}→{args.lambda_l1_end} | MS-SSIM={args.ms_ssim_lambda}")
+    print(f"  {arch_name} | {args.epochs} epochs | LR={args.lr_schedule}")
+    print(f"  discriminators={len(discriminators)} | L1={args.lambda_l1}→{args.lambda_l1_end} | MS-SSIM={args.ms_ssim_lambda}")
     print(f"  perc={args.perceptual_lambda} | fm={args.feature_matching_lambda} | R1γ={args.r1_gamma}")
     print(f"  gen_lr={args.gen_lr} | disc_lr={args.disc_lr} | G:D={max(1,args.gen_updates)}:1")
     print(f"  gan_mode={args.gan_mode} | norm={args.generator_norm} | spectral={args.spectral_norm}")
@@ -1069,7 +1247,7 @@ def main():
                 train_step,
                 args=(
                     sat_b, map_b,
-                    generator, discriminator,
+                    generator, discriminators,
                     gen_opt, disc_opt,
                     tf.constant(lambda_l1_now,      dtype=tf.float32),
                     args.label_smoothing,
@@ -1179,7 +1357,8 @@ def main():
                     if tf.io.gfile.exists(bp):
                         tf.io.gfile.remove(bp)
                     generator.save(bp)
-                    discriminator.save(os.path.join(args.savedir, 'best_discriminator.keras'))
+                    for di, d in enumerate(discriminators):
+                        d.save(os.path.join(args.savedir, f'best_discriminator_d{di+1}.keras'))
                     print(f"  [BEST] SSIM={best_ssim:.4f} at epoch {epoch + 1} -> {bp}")
 
         append_csv_log(csv_path, csv_row)
@@ -1188,8 +1367,8 @@ def main():
         if (epoch + 1) % 10 == 0:
             periodic_ckpt_path = os.path.join(args.savedir, f'generator_epoch_{epoch + 1:03d}.keras')
             generator.save(periodic_ckpt_path)
-            disc_ckpt_path = periodic_ckpt_path.replace('generator_', 'discriminator_')
-            discriminator.save(disc_ckpt_path)
+            for di, d in enumerate(discriminators):
+                d.save(os.path.join(args.savedir, f'discriminator_epoch_{epoch + 1:03d}_d{di+1}.keras'))
             print(f"  [PERIODIC] Saved epoch {epoch + 1:03d} -> {periodic_ckpt_path}")
 
         if (epoch + 1) % args.save_every == 0:
@@ -1205,12 +1384,14 @@ def main():
     # Print resume instructions
     print(f"\n{'=' * 60}")
     print(f"[SUMMARY] To continue training from saved checkpoints:")
-    print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py "
+    hd_flag = ' --use_pix2pixhd' if args.use_pix2pixhd else ''
+    print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py{hd_flag} "
           f"--resume {args.savedir}/best_generator.keras "
-          f"--resume_disc {args.savedir}/best_discriminator.keras")
+          f"--resume_disc {args.savedir}/best_discriminator_d1.keras")
     if args.epochs > 10:
-        print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py --resume {args.savedir}/generator_epoch_050.keras "
-              f"--resume_disc {args.savedir}/discriminator_epoch_050.keras")
+        print(f"  CUDA_VISIBLE_DEVICES=2 python src/train.py{hd_flag} "
+              f"--resume {args.savedir}/generator_epoch_050.keras "
+              f"--resume_disc {args.savedir}/discriminator_epoch_050_d1.keras")
     print(f"{'=' * 60}\n")
 
     if args.export:
