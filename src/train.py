@@ -618,8 +618,11 @@ def train_step(satellite, real_map, generator, discriminators,
     Discriminator loss = LSGAN + R1 gradient penalty (prevents collapse)
     """
     _ZEROS = tf.constant(0.0, dtype=tf.float32)
-    _ZERO_RETURN = (_ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS, _ZEROS)
     num_scales = len(discriminators)
+
+    def _warn_non_finite(tag):
+        tf.print(f"[WARN] {tag} non-finite, skipping batch")
+        return tf.constant(0)
 
     def add_noise(x):
         if disc_input_noise_std <= 0:
@@ -700,19 +703,31 @@ def train_step(satellite, real_map, generator, discriminators,
             )
 
             gen_total = tf.clip_by_value(gen_total, 0.0, 500.0)
-
-            if not tf.math.is_finite(gen_total):
-                tf.print("[WARN] gen_total non-finite, skipping batch")
-                return _ZERO_RETURN
+            gen_total_finite = tf.math.is_finite(gen_total)
+            tf.cond(gen_total_finite, lambda: tf.constant(0),
+                    lambda: _warn_non_finite("gen_total"))
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
+        gen_scale = tf.cast(gen_total_finite, tf.float32)
         gen_grads = [
-            tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
+            tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) * gen_scale
             if g is not None else None
             for g in gen_grads
         ]
         gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
+
+        # Zero out the reported losses for a non-finite batch instead of an
+        # early return — AutoGraph requires symmetric if/else branches, and
+        # an early `return` nested inside both this for-loop and the
+        # GradientTape `with` block violates that for the multi-scale
+        # (3-discriminator) Pix2PixHD path.
+        gen_total = tf.where(gen_total_finite, gen_total, _ZEROS)
+        gen_adv   = tf.where(gen_total_finite, gen_adv, _ZEROS)
+        gen_l1    = tf.where(gen_total_finite, gen_l1, _ZEROS)
+        fm        = tf.where(gen_total_finite, fm, _ZEROS)
+        perc      = tf.where(gen_total_finite, perc, _ZEROS)
+        ms_ssim   = tf.where(gen_total_finite, ms_ssim, _ZEROS)
 
     # ---- Discriminator update with R1 gradient penalty (multi-scale) ----
     real_map_f32 = tf.cast(real_map, tf.float32)
@@ -753,20 +768,23 @@ def train_step(satellite, real_map, generator, discriminators,
 
         disc_total = disc_loss_avg + r1_penalty
         disc_total = tf.clip_by_value(disc_total, 0.0, 150.0)
-
-        if not tf.math.is_finite(disc_total):
-            tf.print("[WARN] disc_total non-finite, skipping batch")
-            return _ZERO_RETURN
+        disc_total_finite = tf.math.is_finite(disc_total)
+        tf.cond(disc_total_finite, lambda: tf.constant(0),
+                lambda: _warn_non_finite("disc_total"))
 
     disc_grads = dt.gradient(disc_total, disc_all_vars)
     disc_grads, _ = tf.clip_by_global_norm(disc_grads, 1.0)
+    disc_scale = tf.cast(disc_total_finite, tf.float32)
     disc_grads = [
-        tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
+        tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) * disc_scale
         if g is not None else None
         for g in disc_grads
     ]
     if update_disc:
         disc_opt.apply_gradients(zip(disc_grads, disc_all_vars))
+
+    disc_total = tf.where(disc_total_finite, disc_total, _ZEROS)
+    r1_penalty = tf.where(disc_total_finite, r1_penalty, _ZEROS)
 
     return gen_total, gen_adv, gen_l1, disc_total, fm, perc, ms_ssim, r1_penalty
 
