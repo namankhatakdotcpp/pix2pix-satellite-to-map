@@ -620,10 +620,6 @@ def train_step(satellite, real_map, generator, discriminators,
     _ZEROS = tf.constant(0.0, dtype=tf.float32)
     num_scales = len(discriminators)
 
-    def _warn_non_finite(tag):
-        tf.print(f"[WARN] {tag} non-finite, skipping batch")
-        return tf.constant(0)
-
     def add_noise(x):
         if disc_input_noise_std <= 0:
             return x
@@ -704,8 +700,6 @@ def train_step(satellite, real_map, generator, discriminators,
 
             gen_total = tf.clip_by_value(gen_total, 0.0, 500.0)
             gen_total_finite = tf.math.is_finite(gen_total)
-            tf.cond(gen_total_finite, lambda: tf.constant(0),
-                    lambda: _warn_non_finite("gen_total"))
 
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
@@ -769,8 +763,6 @@ def train_step(satellite, real_map, generator, discriminators,
         disc_total = disc_loss_avg + r1_penalty
         disc_total = tf.clip_by_value(disc_total, 0.0, 150.0)
         disc_total_finite = tf.math.is_finite(disc_total)
-        tf.cond(disc_total_finite, lambda: tf.constant(0),
-                lambda: _warn_non_finite("disc_total"))
 
     disc_grads = dt.gradient(disc_total, disc_all_vars)
     disc_grads, _ = tf.clip_by_global_norm(disc_grads, 1.0)
