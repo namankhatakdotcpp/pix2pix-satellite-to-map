@@ -621,8 +621,12 @@ def train_step(satellite, real_map, generator, discriminators,
     num_scales = len(discriminators)
 
     def add_noise(x):
-        if disc_input_noise_std <= 0:
-            return x
+        # disc_input_noise_std is a traced tf.constant, not a Python float —
+        # a Python `if` on it gets AutoGraph-converted to tf.cond. Called
+        # inside the per-discriminator loop (3x for Pix2PixHD), that produced
+        # a dozen+ tf.cond ops per step, one of which triggered a GPU
+        # Optional/variant placement error. stddev=0 already yields all-zero
+        # noise, so the branch was redundant — just always add it.
         return x + tf.random.normal(tf.shape(x), 0.0, disc_input_noise_std, dtype=x.dtype)
 
     gen_total = _ZEROS
@@ -664,22 +668,25 @@ def train_step(satellite, real_map, generator, discriminators,
                     adv_s = bce_loss(tf.ones_like(d_fake_out[0]), d_fake_out[0])
                 adv_sum += adv_s
 
-                if fm_lambda > 0:
-                    fm_s = feature_matching_loss_fn(d_real_out[1:], d_fake_out[1:])
-                    fm_sum += fm_s
+                # fm_lambda is a traced tensor; gating this with a Python
+                # `if` inside the discriminator loop creates one tf.cond per
+                # scale. fm_lambda already zeroes the term in gen_total when
+                # 0, so just always compute it.
+                fm_s = feature_matching_loss_fn(d_real_out[1:], d_fake_out[1:])
+                fm_sum += fm_s
 
             gen_adv = adv_sum / tf.cast(num_scales, tf.float32)
-            fm = fm_sum / tf.cast(num_scales, tf.float32) if fm_lambda > 0 else _ZEROS
+            fm = fm_sum / tf.cast(num_scales, tf.float32)
 
             l1 = tf.reduce_mean(tf.abs(tf.cast(real_map, tf.float32) - gen_map_f32))
             gen_l1 = l1
 
             perc = perceptual_loss_fn(perc_model, real_map, gen_map)
 
-            if ms_ssim_lambda > 0:
-                ms_ssim = ms_ssim_loss_fn(real_map, gen_map)
-            else:
-                ms_ssim = _ZEROS
+            # ms_ssim_lambda is a traced tensor too; same AutoGraph-cond
+            # issue as fm_lambda above — always compute, let the lambda
+            # multiplier downstream zero it out when disabled.
+            ms_ssim = ms_ssim_loss_fn(real_map, gen_map)
 
             gen_adv = tf.cast(gen_adv, tf.float32)
             gen_l1 = tf.cast(gen_l1, tf.float32)
