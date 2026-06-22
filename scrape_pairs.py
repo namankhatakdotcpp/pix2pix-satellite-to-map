@@ -1,8 +1,11 @@
-import requests, os
+import os
+import requests
 from PIL import Image
 from io import BytesIO
 
-MAPBOX_TOKEN = "YOUR_TOKEN_HERE"   # paste your token
+MAPBOX_TOKEN = os.environ.get("MAPBOX_TOKEN")
+if not MAPBOX_TOKEN:
+    raise RuntimeError("MAPBOX_TOKEN environment variable not set. Run: export MAPBOX_TOKEN='your_token'")
 ZOOM = 17
 OUT_DIR = "datasets/scraped"
 os.makedirs(OUT_DIR, exist_ok=True)
