@@ -33,12 +33,6 @@ import imageio
 from pathlib import Path
 from tqdm import tqdm
 
-# DIAGNOSTIC: Disable graph mode to isolate TensorFlow 2.19 graph runtime issues
-# This is a temporary debugging step - if training works in eager mode,
-# the root cause is TensorFlow graph compilation, NOT the GAN code.
-tf.config.run_functions_eagerly(True)
-print("[DEBUG] Running in EAGER MODE (tf.function disabled) — FOR DEBUGGING ONLY")
-
 # TensorFlow Addons removed due to version incompatibility with TF 2.19+
 # SpectralNormalization disabled for stability (use LayerNormalization instead)
 SpectralNormalization = None
@@ -129,21 +123,19 @@ def build_dataset(data_dir, batch_size, is_train=True, split_order="map_sat",
     
     if is_train:
         ds = ds.shuffle(len(image_files), reshuffle_each_iteration=True)
-        # Map with minimal parallelism (num_parallel_calls=1)
         ds = ds.map(
             lambda p: load_train_image(p, split_order),
-            num_parallel_calls=1,
+            num_parallel_calls=tf.data.AUTOTUNE,
         )
-        # NO cache, NO shuffle after cache, NO prefetch
         ds = ds.batch(batch_size)
+        ds = ds.prefetch(tf.data.AUTOTUNE)
     else:
-        # Test dataset: minimal pipeline
         ds = ds.map(
             lambda p: load_test_image(p, split_order),
-            num_parallel_calls=1,
+            num_parallel_calls=tf.data.AUTOTUNE,
         )
-        # NO cache, NO prefetch
         ds = ds.batch(1)
+        ds = ds.prefetch(tf.data.AUTOTUNE)
 
     # Force CPU dataset execution - disable automatic sharding
     options = tf.data.Options()
@@ -573,7 +565,6 @@ def train_step(satellite, real_map, generator, discriminator,
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         # Stronger gradient clamping: global norm + element-wise clipping
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
-        gen_grads = [tf.clip_by_value(g, -0.1, 0.1) if g is not None else None for g in gen_grads]
         # CRITICAL: Filter NaN gradients before applying
         gen_grads = [
             tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
@@ -830,11 +821,11 @@ def main():
                     help='Floor LR for cosine annealing.')
 
     # Loss weights
-    ap.add_argument('--lambda_l1',     type=float, default=50.0,
+    ap.add_argument('--lambda_l1',     type=float, default=100.0,
                     help='L1 pixel loss weight at epoch 0.')
-    ap.add_argument('--lambda_l1_end', type=float, default=30.0,
+    ap.add_argument('--lambda_l1_end', type=float, default=100.0,
                     help='L1 pixel loss weight at final epoch (linear decay).')
-    ap.add_argument('--ms_ssim_lambda',             type=float, default=80.0,
+    ap.add_argument('--ms_ssim_lambda',             type=float, default=0.0,
                     help='MS-SSIM loss weight (explicit SSIM optimisation).')
     ap.add_argument('--perceptual_lambda', '--lambda_perc',
                     dest='perceptual_lambda',       type=float, default=10.0)
