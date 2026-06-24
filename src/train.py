@@ -404,6 +404,90 @@ def build_global_generator(norm_type='instance'):
     return tf.keras.Model(inputs=inputs, outputs=last(x), name='global_generator')
 
 
+# Spatial-resolution-matched skip layers from ResNet50 (128x128 input):
+#   conv1_relu        : 64x64,   64ch  (stride 2)
+#   conv2_block3_out   : 32x32,  256ch (stride 4)
+#   conv3_block4_out   : 16x16,  512ch (stride 8)
+#   conv4_block6_out   :  8x8,  1024ch (stride 16)
+#   backbone output    :  4x4,  2048ch (stride 32, bottleneck)
+RESNET_SKIP_LAYERS = ['conv1_relu', 'conv2_block3_out', 'conv3_block4_out', 'conv4_block6_out']
+
+
+def build_resnet_encoder(input_shape=(128, 128, 3)):
+    """
+    Frozen-by-default pretrained ResNet50 encoder for G1, used fully-
+    convolutionally (no classification head) at G1's native 128x128
+    resolution. Returns (encoder_model, backbone) — the caller needs the
+    raw `backbone` handle to toggle `.trainable` for the staged unfreeze.
+    """
+    backbone = tf.keras.applications.ResNet50(
+        include_top=False, weights='imagenet', input_shape=input_shape,
+    )
+    backbone.trainable = False  # frozen for stage 1
+
+    skips = [backbone.get_layer(n).output for n in RESNET_SKIP_LAYERS]
+    encoder_model = tf.keras.Model(
+        inputs=backbone.input, outputs=[backbone.output] + skips,
+        name='g1_resnet_encoder',
+    )
+    return encoder_model, backbone
+
+
+def build_global_generator_resnet(norm_type='instance'):
+    """
+    G1 variant: pretrained ResNet50 backbone in place of the from-scratch
+    U-Net encoder in build_global_generator(). Decoder topology (skip-
+    connected Conv2DTranspose upsampling back to 128x128) is structurally
+    the same kind of block, with filter counts adjusted to ResNet50's
+    channel counts at each matching resolution:
+      64x64:   64ch (conv1_relu)        vs. old   64ch
+      32x32:  256ch (conv2_block3_out)  vs. old  128ch
+      16x16:  512ch (conv3_block4_out)  vs. old  256ch
+       8x8:  1024ch (conv4_block6_out)  vs. old  512ch (SelfAttention here)
+       4x4:  2048ch (bottleneck)        vs. old 1x1,512ch
+    ResNet50 has 5 stride-2 stages vs. the old encoder's 7, so the decoder
+    uses 4 skip-connected upsamples + 1 final Conv2DTranspose (4->128,
+    5 doublings) instead of 6+1 (1->128, 7 doublings) — same net 128x128
+    I/O resolution, topology otherwise unchanged.
+    """
+    inputs = tf.keras.layers.Input(shape=[128, 128, 3])
+    init = tf.random_normal_initializer(0., 0.02)
+
+    encoder, backbone = build_resnet_encoder(input_shape=(128, 128, 3))
+
+    # ResNet50/ImageNet expects [0,255]-scaled, mean-subtracted, BGR-ordered
+    # input. Everywhere else in this codebase normalizes to [-1, 1] RGB —
+    # convert ONLY on this branch, right before the backbone call.
+    x_pre = tf.keras.layers.Lambda(
+        lambda t: tf.keras.applications.resnet50.preprocess_input((t + 1.0) * 127.5),
+        name='resnet_preprocess',
+    )(inputs)
+
+    bottleneck, skip64, skip32, skip16, skip8 = encoder(x_pre)
+    skip8 = SelfAttention(1024, name='g1_resnet_bottleneck_attn')(skip8)
+
+    up_stack = [
+        upsample(512, 4, apply_dropout=True, norm_type=norm_type),  # 4x4  -> 8x8
+        upsample(256, 4, norm_type=norm_type),                       # 8x8  -> 16x16
+        upsample(128, 4, norm_type=norm_type),                       # 16x16-> 32x32
+        upsample(64,  4, norm_type=norm_type),                       # 32x32-> 64x64
+    ]
+    skips = [skip8, skip16, skip32, skip64]
+
+    last = tf.keras.layers.Conv2DTranspose(
+        3, 4, strides=2, padding='same',
+        kernel_initializer=init, activation='tanh', dtype='float32',
+    )
+
+    x = bottleneck
+    for up, skip in zip(up_stack, skips):
+        x = up(x)
+        x = tf.keras.layers.Concatenate()([x, skip])
+
+    model = tf.keras.Model(inputs=inputs, outputs=last(x), name='global_generator_resnet')
+    return model, backbone
+
+
 def build_local_enhancer(global_generator, input_shape=(256, 256, 3)):
     """
     G2: takes 256x256 input, downsamples to 128x128 for G1,
@@ -609,14 +693,30 @@ def get_pyramid(img, num_scales):
 def train_step(satellite, real_map, generator, discriminators,
                gen_opt, disc_opt, lambda_l1, label_smoothing, label_noise,
                fm_lambda, perc_model, perc_lambda, gan_mode, update_disc,
-               gen_updates, disc_input_noise_std, ms_ssim_lambda, r1_gamma):
+               gen_updates, disc_input_noise_std, ms_ssim_lambda, r1_gamma,
+               backbone_lr_scale):
     """
     Single distributed training step with multi-scale discriminator support.
 
     discriminators: list of PatchGAN discriminators (len 1 for vanilla, len 3 for Pix2PixHD).
     Generator loss  = LSGAN_adv + λ_l1*L1 + λ_ms*MS-SSIM + λ_fm*FM + λ_perc*Perceptual
     Discriminator loss = LSGAN + R1 gradient penalty (prevents collapse)
+
+    backbone_lr_scale: multiplier applied to gradients of any variable whose
+    name is in generator._backbone_var_names (the pretrained ResNet50
+    encoder, when --use_pretrained_encoder is active). Before the unfreeze
+    epoch the backbone is Keras-frozen (trainable=False) so its weights
+    aren't in generator.trainable_variables at all and this scale is moot;
+    after unfreeze it approximates a separate, lower LR for those vars
+    while still using the single gen_opt — chosen over a second optimizer
+    because it requires no change to train_step's call signature shape and
+    composes cleanly with the existing single-optimizer apply_gradients
+    call. The per-variable name check below is a plain Python string-set
+    membership test evaluated at trace time (v.name is a static Python
+    property), not a condition on a tensor's runtime value, so it does not
+    get AutoGraph-converted into a tf.cond.
     """
+    backbone_var_names = getattr(generator, '_backbone_var_names', frozenset())
     _ZEROS = tf.constant(0.0, dtype=tf.float32)
     num_scales = len(discriminators)
 
@@ -711,12 +811,14 @@ def train_step(satellite, real_map, generator, discriminators,
         gen_grads = gt.gradient(gen_total, generator.trainable_variables)
         gen_grads, _ = tf.clip_by_global_norm(gen_grads, 1.0)
         gen_scale = tf.cast(gen_total_finite, tf.float32)
+        gen_vars = generator.trainable_variables
         gen_grads = [
-            tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) * gen_scale
+            (tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) * gen_scale
+             * (backbone_lr_scale if v.name in backbone_var_names else 1.0))
             if g is not None else None
-            for g in gen_grads
+            for g, v in zip(gen_grads, gen_vars)
         ]
-        gen_opt.apply_gradients(zip(gen_grads, generator.trainable_variables))
+        gen_opt.apply_gradients(zip(gen_grads, gen_vars))
 
         # Zero out the reported losses for a non-finite batch instead of an
         # early return — AutoGraph requires symmetric if/else branches, and
@@ -1012,6 +1114,12 @@ def main():
                     help='Use Pix2PixHD architecture (coarse-to-fine generator + multi-scale discriminator)')
     ap.add_argument('--g1_pretrain_epochs', type=int, default=0,
                     help='Epochs to train G1 alone before introducing G2 (0 = train jointly)')
+    ap.add_argument('--use_pretrained_encoder', action='store_true',
+                    help='Replace G1\'s from-scratch encoder with a frozen-then-finetuned ResNet50 (requires --use_pix2pixhd)')
+    ap.add_argument('--encoder_unfreeze_epoch', type=int, default=20,
+                    help='Epoch at which the ResNet50 backbone unfreezes for fine-tuning')
+    ap.add_argument('--encoder_finetune_lr', type=float, default=1e-5,
+                    help='Effective LR applied to backbone vars after unfreezing (via gradient scaling)')
 
     # Dataset
     ap.add_argument('--split_order',   default='map_sat', choices=['map_sat', 'sat_map'])
@@ -1034,6 +1142,17 @@ def main():
     if args.lr is not None:
         args.gen_lr = float(args.lr)
         args.disc_lr = float(args.lr)
+
+    if args.use_pretrained_encoder and not args.use_pix2pixhd:
+        print("[WARN] --use_pretrained_encoder has no effect without --use_pix2pixhd "
+              "(G1 only exists in that path); ignoring.")
+        args.use_pretrained_encoder = False
+
+    if args.use_pretrained_encoder and args.resume:
+        print("[WARNING] --use_pretrained_encoder changes G1's architecture. "
+              "If the resume checkpoint was trained WITHOUT a pretrained "
+              "encoder, generator weights will fail to load. Start fresh "
+              "(omit --resume) for the first pretrained-encoder run.")
 
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 
@@ -1095,22 +1214,35 @@ def main():
             'NoDropout': NoDropout,
         }
 
+        backbone = None
         if args.use_pix2pixhd:
-            print("[MODEL] Using Pix2PixHD architecture (multi-scale)")
-            global_gen = build_global_generator(norm_type=args.generator_norm)
+            if args.use_pretrained_encoder:
+                print("[MODEL] Using Pix2PixHD architecture (multi-scale) with pretrained ResNet50 G1 encoder")
+                global_gen, backbone = build_global_generator_resnet(norm_type=args.generator_norm)
+            else:
+                print("[MODEL] Using Pix2PixHD architecture (multi-scale)")
+                global_gen = build_global_generator(norm_type=args.generator_norm)
             generator = build_local_enhancer(global_gen)
+            generator._backbone_var_names = (
+                set(v.name for v in backbone.weights) if backbone is not None else set()
+            )
             discriminators = build_multiscale_discriminators(use_spectral_norm=False)
         else:
             print("[MODEL] Using standard Pix2Pix architecture")
             generator = build_generator(norm_type=args.generator_norm)
+            generator._backbone_var_names = set()
             discriminators = [build_discriminator(use_spectral_norm=False)]
 
         # Load generator from checkpoint if --resume specified
         if args.resume is not None:
             if os.path.exists(args.resume):
                 print(f"[RESUME] Loading generator weights from: {args.resume}")
+                _backbone_var_names = generator._backbone_var_names
                 generator = tf.keras.models.load_model(
                     args.resume, custom_objects=custom_objects, compile=False)
+                # load_model() returns a fresh Model instance — re-attach
+                # the backbone name-set train_step relies on for LR scaling.
+                generator._backbone_var_names = _backbone_var_names
             else:
                 print(f"[WARN] Resume checkpoint not found: {args.resume}")
 
@@ -1203,10 +1335,30 @@ def main():
     print(f"  perc={args.perceptual_lambda} | fm={args.feature_matching_lambda} | R1γ={args.r1_gamma}")
     print(f"  gen_lr={args.gen_lr} | disc_lr={args.disc_lr} | G:D={max(1,args.gen_updates)}:1")
     print(f"  gan_mode={args.gan_mode} | norm={args.generator_norm} | spectral={args.spectral_norm}")
+    if args.use_pretrained_encoder and backbone is not None:
+        print(f"  pretrained_encoder=ResNet50 | trainable={backbone.trainable} "
+              f"| unfreeze_epoch={args.encoder_unfreeze_epoch} | finetune_lr={args.encoder_finetune_lr}")
     print(f"{'=' * 60}\n")
+
+    # Bound to the module-level @tf.function; reassigned to a fresh
+    # tf.function at the unfreeze epoch below, since the concrete trace
+    # created while the backbone was frozen bakes generator.trainable_variables
+    # (the gradient `sources` list) into the graph at trace time — simply
+    # flipping backbone.trainable afterwards would NOT retroactively add
+    # the backbone's variables to that already-traced gradient computation.
+    train_step_fn = train_step
 
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
+
+        if (args.use_pretrained_encoder and backbone is not None
+                and not backbone.trainable and epoch >= args.encoder_unfreeze_epoch):
+            backbone.trainable = True
+            train_step_fn = tf.function(train_step.python_function)
+            print(f"[ENCODER] Unfreezing ResNet50 backbone at epoch {epoch + 1}, "
+                  f"applying reduced LR {args.encoder_finetune_lr} to those vars "
+                  f"via gradient scaling (forced retrace for new trainable_variables)")
+
 
         # LR schedule
         if args.lr_schedule == 'cosine':
@@ -1224,6 +1376,11 @@ def main():
 
         gen_opt.learning_rate.assign(gen_lr_now)
         disc_opt.learning_rate.assign(disc_lr_now)
+
+        if args.use_pretrained_encoder and backbone is not None and backbone.trainable:
+            backbone_lr_scale_now = args.encoder_finetune_lr / max(gen_lr_now, 1e-12)
+        else:
+            backbone_lr_scale_now = 1.0
 
         # L1 linear decay (100→50 by default)
         l1_frac       = epoch / max(1, args.epochs - 1)
@@ -1261,7 +1418,7 @@ def main():
             update_disc  = ((step % max(1, args.disc_update_interval)) == 0)
 
             per_replica = strategy.run(
-                train_step,
+                train_step_fn,
                 args=(
                     sat_b, map_b,
                     generator, discriminators,
@@ -1278,6 +1435,7 @@ def main():
                     tf.constant(disc_noise_now,     dtype=tf.float32),
                     tf.constant(ms_ssim_lambda_now, dtype=tf.float32),
                     tf.constant(args.r1_gamma,      dtype=tf.float32),
+                    tf.constant(backbone_lr_scale_now, dtype=tf.float32),
                 ),
             )
 
