@@ -1354,10 +1354,20 @@ def main():
         if (args.use_pretrained_encoder and backbone is not None
                 and not backbone.trainable and epoch >= args.encoder_unfreeze_epoch):
             backbone.trainable = True
+
+            # Keras 3.9.2: apply_gradients() rejects any variable not present in
+            # the optimizer's internal _trainable_variables list, which is only
+            # populated inside build(). Newly-trainable backbone variables did not
+            # exist in that list when gen_opt was first built, so rebuild it now
+            # with the full, updated variable set before the next apply_gradients
+            # call, or every backbone variable is rejected as "Unknown variable".
+            all_gen_vars = generator.trainable_variables
+            gen_opt.build(all_gen_vars)
+
             train_step_fn = tf.function(train_step.python_function)
             print(f"[ENCODER] Unfreezing ResNet50 backbone at epoch {epoch + 1}, "
-                  f"applying reduced LR {args.encoder_finetune_lr} to those vars "
-                  f"via gradient scaling (forced retrace for new trainable_variables)")
+                  f"rebuilt optimizer with {len(all_gen_vars)} trainable vars "
+                  f"({len(backbone.trainable_variables)} from backbone)")
 
 
         # LR schedule
