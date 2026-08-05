@@ -1361,7 +1361,13 @@ def main():
             # exist in that list when gen_opt was first built, so rebuild it now
             # with the full, updated variable set before the next apply_gradients
             # call, or every backbone variable is rejected as "Unknown variable".
+            # Adam.build() guards on self.built and no-ops if already built (which
+            # it is, from the first apply_gradients call in epoch 0), so the guard
+            # must be cleared first or the rebuild silently does nothing. This also
+            # resets Adam's momentum/velocity slots for every generator variable,
+            # not just the newly-unfrozen backbone ones.
             all_gen_vars = generator.trainable_variables
+            gen_opt.built = False
             gen_opt.build(all_gen_vars)
 
             train_step_fn = tf.function(train_step.python_function)
